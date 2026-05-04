@@ -62,9 +62,9 @@ const ITYPES = [
 
 const PMS = [
   {id:"corrente", e:"🏦", l:"Conta Corrente"},
-  {id:"card1",    e:"💳", l:"Cartão 1"},
-  {id:"card2",    e:"💳", l:"Cartão 2"},
-  {id:"card3",    e:"💳", l:"Cartão 3"},
+  {id:"card1",    e:"💳", l:"Cartão Casa"},
+  {id:"card2",    e:"💳", l:"Cartão Marcio"},
+  {id:"card3",    e:"💳", l:"Cartão Juliana"},
 ];
 
 const MONTHS = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
@@ -87,7 +87,7 @@ function App() {
   const [mode,      setMode]      = useState("expense");
   const [month,     setMonth]     = useState(now.getMonth());
   const [year]                    = useState(now.getFullYear());
-  const [names,     setNames]     = useState({p1:"Você", p2:"Parceiro(a)"});
+  const [names,     setNames]     = useState({p1:"Marcio", p2:"Juliana"});
   const [editN,     setEditN]     = useState(false);
   const [ok,        setOk]        = useState("");
   const [invOk,     setInvOk]     = useState("");
