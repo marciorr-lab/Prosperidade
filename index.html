@@ -139,9 +139,9 @@ const ITYPES = [
 // Compra até esse dia entra na fatura que debita no mês seguinte; depois, na do mês subsequente.
 const PMS = [
   {id:"corrente", e:"🏦", l:"Conta Corrente", isCard:false},
-  {id:"card1",    e:"💳", l:"Cartão Casa",    isCard:true, closeDay:27, dueDay:10},
-  {id:"card2",    e:"💳", l:"Cartão Marcio",  isCard:true, closeDay:27, dueDay:10},
-  {id:"card3",    e:"💳", l:"Cartão Ju",      isCard:true, closeDay:27, dueDay:10},
+  {id:"card1",    e:"💳", l:"Cartão Casa",    isCard:true, closeDay:29, dueDay:10},
+  {id:"card2",    e:"💳", l:"Cartão Marcio",  isCard:true, closeDay:29, dueDay:10},
+  {id:"card3",    e:"💳", l:"Cartão Ju",      isCard:true, closeDay:29, dueDay:10},
 ];
 
 const PERSONS = [
@@ -347,6 +347,8 @@ function MainApp({user, onLogout}) {
   const [importErr, setImportErr] = useState("");
   const [bulkBill, setBulkBill] = useState({month:now.getMonth(), year:now.getFullYear()});
   const fileInputRef = useRef(null);
+  const addLock = useRef(false);
+  const [efBillSel, setEfBillSel] = useState({on:false, month:0, year:now.getFullYear()});
 
   const today = now.toISOString().split("T")[0];
   const [ef,   setEf]   = useState({desc:"",amt:"",cat:"mercado",pm:"corrente",person:"p1",date:today});
@@ -391,22 +393,41 @@ function MainApp({user, onLogout}) {
   const fBase = useMemo(()=> fPmIsCard ? expenses.filter(e=>e.isCard&&e.billMonth===month&&e.billYear===year) : mExp,[fPmIsCard,expenses,mExp,month,year]);
   const existingKeyCount = useMemo(()=>{
     const m={};
-    expenses.forEach(e=>{ const k=dupKey({date:e.date,desc:e.desc,amount:e.amount,kind:"gasto",pm:e.pm}); m[k]=(m[k]||0)+1; });
-    incomes.forEach(i=>{ const k=dupKey({date:i.date,desc:i.desc,amount:i.amount,kind:"entrada"}); m[k]=(m[k]||0)+1; });
+    expenses.filter(e=>e.importedFrom==="import").forEach(e=>{ const k=dupKey({date:e.date,desc:e.desc,amount:e.amount,kind:"gasto",pm:e.pm}); m[k]=(m[k]||0)+1; });
+    incomes.filter(i=>i.importedFrom==="import").forEach(i=>{ const k=dupKey({date:i.date,desc:i.desc,amount:i.amount,kind:"entrada"}); m[k]=(m[k]||0)+1; });
     return m;
   },[expenses,incomes]);
+  // Lançamentos digitados à mão (sem marca de importação): podem ser a mesma compra que veio no CSV.
+  const manualExp = useMemo(()=>expenses.filter(e=>e.importedFrom!=="import"),[expenses]);
+  const manualInc = useMemo(()=>incomes.filter(i=>i.importedFrom!=="import"),[incomes]);
   // Para cada linha da revisão: é duplicata de algo já gravado? é inválida? será ignorada?
   // Contagem por ocorrência: duas compras idênticas no mesmo dia continuam valendo (só ignora o que já existe no banco).
   const rowStatus = useMemo(()=>{
-    const seen={};
+    const seen={}, usedManual={};
+    const T = ds => new Date(ds+"T12:00:00").getTime();
     return reviewRows.map(r=>{
       const k=dupKey(r); const n=seen[k]||0; seen[k]=n+1;
       const dup=(existingKeyCount[k]||0)>n;
       const isC = PMS.find(p=>p.id===r.pm)?.isCard;
       const payment = r.kind==="gasto" && !isC && CARD_PAYMENT_RE.test(r.norm||"");
-      return {dup, payment, invalid:!!r.invalid, skip: !!r.invalid || ((dup||payment) && !r.forceInclude)};
+      const invalid = !!r.invalid;
+      // Parece um lançamento manual? Mesmo valor, mesma forma de pagamento (gastos) e data a até 3 dias.
+      let manual = null;
+      if(!dup && !payment && !invalid){
+        const pool = r.kind==="entrada" ? manualInc : manualExp;
+        let best=null, bestD=Infinity;
+        pool.forEach(m=>{
+          if(usedManual[m.id]) return;
+          if(r.kind!=="entrada" && m.pm!==r.pm) return;
+          if(Math.abs(m.amount-r.amount)>=0.005) return;
+          const dd=Math.abs(T(m.date)-T(r.date))/86400000;
+          if(dd<=3 && dd<bestD){ best=m; bestD=dd; }
+        });
+        if(best){ usedManual[best.id]=1; manual={id:best.id, coll:r.kind==="entrada"?"incomes":"expenses", desc:best.desc, date:best.date}; }
+      }
+      return {dup, payment, invalid, manual, skip: invalid || ((dup||payment) && !r.forceInclude)};
     });
-  },[reviewRows,existingKeyCount]);
+  },[reviewRows,existingKeyCount,manualExp,manualInc]);
 
   const importBatches = useMemo(()=>{
     const m={};
@@ -456,38 +477,61 @@ function MainApp({user, onLogout}) {
   const maxType = byType.length>0?byType[0].total:1;
 
   const addExp = async()=>{
+    if(addLock.current) return;
     if(!ef.desc||!ef.amt||parseFloat(ef.amt)<=0) return;
+    const amountNum = parseFloat(parseFloat(ef.amt).toFixed(2));
+    const same = expenses.find(e=>e.date===ef.date && e.pm===ef.pm && Math.abs(e.amount-amountNum)<0.005);
+    if(same && !window.confirm("Já existe um gasto de "+fmt(same.amount)+" em "+ef.date.split("-").reverse().join("/")+" nessa forma de pagamento ("+same.desc+"). Lançar mesmo assim?")) return;
+    addLock.current = true;
     setSyncing(true);
-    const d = new Date(ef.date+"T12:00:00");
-    const isCard = PMS.find(p=>p.id===ef.pm)?.isCard||false;
-    const bill = isCard ? billingFor(ef.date, ef.pm) : null;
-    await db.collection("expenses").add({
-      date:ef.date, month:d.getMonth(), year:d.getFullYear(),
-      desc:ef.desc, cat:ef.cat, pm:ef.pm, person:ef.person,
-      amount:parseFloat(parseFloat(ef.amt).toFixed(2)),
-      isCard,
-      billMonth: isCard?bill.month:null,
-      billYear:  isCard?bill.year:null,
-      createdAt: new Date().toISOString()
-    });
-    setEf(f=>({...f,desc:"",amt:""}));
+    try{
+      const d = new Date(ef.date+"T12:00:00");
+      const isCard = PMS.find(p=>p.id===ef.pm)?.isCard||false;
+      const bill = isCard ? (efBillSel.on ? {month:efBillSel.month, year:efBillSel.year} : billingFor(ef.date, ef.pm)) : null;
+      await db.collection("expenses").add({
+        date:ef.date, month:d.getMonth(), year:d.getFullYear(),
+        desc:ef.desc, cat:ef.cat, pm:ef.pm, person:ef.person,
+        amount:amountNum,
+        isCard,
+        billMonth: isCard?bill.month:null,
+        billYear:  isCard?bill.year:null,
+        createdAt: new Date().toISOString(),
+        importedFrom:"manual"
+      });
+      setEf(f=>({...f,desc:"",amt:""}));
+      setEfBillSel({on:false, month:0, year:now.getFullYear()});
+      flash(isCard?"Cartão lançado! Débito em "+MONTHS[bill.month]+" ✓":"Gasto lançado! ✓");
+    }catch(err){
+      flash("Não consegui lançar. Tente de novo.");
+    }
     setSyncing(false);
-    flash(isCard?"Cartão lançado! Débito em "+MONTHS[bill.month]+" ✓":"Gasto lançado! ✓");
+    addLock.current = false;
   };
 
   const addInc = async()=>{
+    if(addLock.current) return;
     if(!inf.desc||!inf.amt||parseFloat(inf.amt)<=0) return;
+    const amountNum = parseFloat(parseFloat(inf.amt).toFixed(2));
+    const same = incomes.find(i=>i.date===inf.date && i.person===inf.person && Math.abs(i.amount-amountNum)<0.005);
+    if(same && !window.confirm("Já existe uma entrada de "+fmt(same.amount)+" em "+inf.date.split("-").reverse().join("/")+" para essa pessoa ("+same.desc+"). Lançar mesmo assim?")) return;
+    addLock.current = true;
     setSyncing(true);
-    const d=new Date(inf.date+"T12:00:00");
-    await db.collection("incomes").add({
-      date:inf.date,month:d.getMonth(),year:d.getFullYear(),
-      desc:inf.desc,type:inf.type,person:inf.person,
-      amount:parseFloat(parseFloat(inf.amt).toFixed(2)),
-      createdAt:new Date().toISOString()
-    });
-    setInf(f=>({...f,desc:"",amt:""}));
+    try{
+      const d=new Date(inf.date+"T12:00:00");
+      await db.collection("incomes").add({
+        date:inf.date,month:d.getMonth(),year:d.getFullYear(),
+        desc:inf.desc,type:inf.type,person:inf.person,
+        amount:amountNum,
+        createdAt:new Date().toISOString(),
+        importedFrom:"manual"
+      });
+      setInf(f=>({...f,desc:"",amt:""}));
+      flash("Entrada registrada! ✓");
+    }catch(err){
+      flash("Não consegui registrar. Tente de novo.");
+    }
     setSyncing(false);
-    flash("Entrada registrada! ✓");
+    addLock.current = false;
   };
 
   const updateExp = async()=>{
@@ -647,11 +691,19 @@ function MainApp({user, onLogout}) {
   const clearImport = () => { setReviewRows([]); setImportErr(""); setExpTotals({}); };
 
   const confirmImport = async () => {
-    const rows = reviewRows.filter((_,i)=>!(rowStatus[i]&&rowStatus[i].skip));
+    const rows = [];
+    const manualDel = [];
+    reviewRows.forEach((r,i)=>{
+      const st = rowStatus[i];
+      if(st && st.skip) return;
+      rows.push(r);
+      if(st && st.manual && r.manualAction!=="keep") manualDel.push(st.manual);
+    });
     const skipped = reviewRows.length - rows.length;
     if(rows.length===0){ setImportErr("Nada novo para importar: todas as linhas são duplicadas, pagamentos de fatura ou inválidas."); return; }
     const mism = importSummary.filter(g=>{ const t=expTotals[g.key]; if(t===undefined||String(t).trim()==="") return false; return Math.abs(g.fileTotal-parseAmount(t))>=0.005; });
     if(mism.length>0 && !window.confirm("O total de "+mism.map(g=>g.label).join("; ")+" não bate com o valor que você informou. Importar mesmo assim?")) return;
+    if(manualDel.length>0 && !window.confirm(manualDel.length+" lançamento(s) digitado(s) à mão serão substituídos pelos do arquivo (que trazem a descrição e a fatura corretas). Continuar?")) return;
     setSyncing(true); setImportErr("");
     try{
       const batchId = "imp_"+Date.now().toString(36);
@@ -686,10 +738,12 @@ function MainApp({user, onLogout}) {
           rulesToSave[row.norm] = {norm:row.norm, kind:row.kind, cat:row.cat, person:row.person, incType:row.incType};
         }
       });
+      // Os manuais substituídos são apagados por último: se algo falhar no meio, sobra duplicata, nunca perda.
+      manualDel.forEach(m=>ops.push({ref:db.collection(m.coll).doc(m.id), del:true}));
       // O Firestore aceita no máximo 500 operações por batch: grava em blocos de 400.
       for(let i=0;i<ops.length;i+=400){
         const b = db.batch();
-        ops.slice(i,i+400).forEach(o=>b.set(o.ref,o.data));
+        ops.slice(i,i+400).forEach(o=>{ if(o.del) b.delete(o.ref); else b.set(o.ref,o.data); });
         await b.commit();
       }
 
@@ -706,7 +760,7 @@ function MainApp({user, onLogout}) {
       setReviewRows([]);
       setExpTotals({});
       setSyncing(false);
-      flash(rows.length+" lançamentos importados"+(skipped?" ("+skipped+" ignorados)":"")+"! ✓");
+      flash(rows.length+" lançamentos importados"+(manualDel.length?", "+manualDel.length+" manuais substituídos":"")+(skipped?" ("+skipped+" ignorados)":"")+"! ✓");
     }catch(err){
       setSyncing(false);
       setImportErr("Erro ao salvar a importação. Confira o que já entrou antes de tentar de novo — duplicados serão ignorados automaticamente.");
@@ -750,6 +804,7 @@ function MainApp({user, onLogout}) {
   const invalidCount = rowStatus.filter(x=>x.invalid).length;
   const autoBillCount = reviewRows.filter((r,i)=>PMS.find(p=>p.id===r.pm)?.isCard && r.billSource!=="csv" && r.billSource!=="manual" && !(rowStatus[i]&&rowStatus[i].invalid)).length;
   const paySkipped = rowStatus.filter(x=>x.payment&&x.skip&&!x.invalid).length;
+  const manualCount = rowStatus.filter((x,i)=>x.manual && reviewRows[i] && reviewRows[i].manualAction!=="keep").length;
   const importSummary = (()=>{
     const m={};
     reviewRows.forEach((r,i)=>{
@@ -823,7 +878,7 @@ function MainApp({user, onLogout}) {
         </div>
 
         {/* Month scroll */}
-        <div style={{display:"flex",gap:4,marginTop:8,overflowX:"auto",paddingBottom:2}}>
+        <div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:8,paddingBottom:2}}>
           {MONTHS.map((m,i)=>(
             <button key={i} onClick={()=>setMonth(i)} style={{background:month===i?"#1a1a2e":"transparent",color:month===i?"#fff":"#8E8E9A",border:month===i?"none":"1px solid #E8E8E8",borderRadius:20,padding:"5px 13px",fontSize:12,cursor:"pointer",whiteSpace:"nowrap",fontWeight:month===i?700:500,transition:"all 0.15s"}}>{m}</button>
           ))}
@@ -899,20 +954,32 @@ function MainApp({user, onLogout}) {
                     ))}
                   </div>
                   {ef.pm!=="corrente"&&ef.date&&(()=>{
-                    const bill=billingFor(ef.date,ef.pm);
+                    const est=billingFor(ef.date,ef.pm);
+                    const bill=efBillSel.on?{month:efBillSel.month,year:efBillSel.year}:est;
                     const pm=PMS.find(p=>p.id===ef.pm);
                     return (
                       <div style={{marginTop:12,background:"#F5F0FF",borderRadius:12,padding:"11px 14px",border:"1px solid #E0D5FF"}}>
                         <div style={{fontSize:12,color:"#6C5CE7",fontWeight:700,marginBottom:4}}>💳 {pm.l}</div>
                         <div style={{fontSize:12,color:"#6C5CE7",lineHeight:1.7}}>
-                          Compra em {MONTHS[new Date(ef.date+"T12:00:00").getMonth()]} → Fatura fecha dia {closeDayOf(ef.pm)} → <strong>Débito no saldo de {MONTHS[bill.month]}</strong>
+                          Compra em {MONTHS[new Date(ef.date+"T12:00:00").getMonth()]} → Fatura fecha dia {closeDayOf(ef.pm)} → <strong>Débito no saldo de {MONTHS[bill.month]}/{bill.year}</strong>{efBillSel.on?" (escolhida por você)":" (estimada)"}
+                        </div>
+                        <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginTop:8}}>
+                          {!efBillSel.on
+                            ? <button onClick={()=>setEfBillSel({on:true,month:est.month,year:est.year})} style={{background:"transparent",border:"1px solid #C9BCFF",borderRadius:10,padding:"6px 10px",fontSize:12,fontWeight:700,color:"#6C5CE7",cursor:"pointer"}}>Escolher a fatura</button>
+                            : <>
+                                <select value={efBillSel.month} onChange={e=>setEfBillSel(b=>({...b,month:parseInt(e.target.value,10)}))} style={SS}>
+                                  {MONTHS.map((m,i)=><option key={i} value={i}>Fatura {m}</option>)}
+                                </select>
+                                <input type="number" value={efBillSel.year} onChange={e=>setEfBillSel(b=>({...b,year:parseInt(e.target.value,10)||b.year}))} style={{...SS,width:72}}/>
+                                <button onClick={()=>setEfBillSel(b=>({...b,on:false}))} style={{background:"transparent",border:"none",fontSize:12,fontWeight:700,color:"#6C5CE7",cursor:"pointer"}}>Usar a estimativa</button>
+                              </>}
                         </div>
                       </div>
                     );
                   })()}
                 </div>
 
-                <button onClick={addExp} style={{background:"#E8544A",border:"none",borderRadius:14,padding:"15px",color:"#fff",fontSize:16,fontWeight:800,cursor:"pointer",boxShadow:"0 4px 14px rgba(232,84,74,0.35)",letterSpacing:0.3}}>Lançar Gasto</button>
+                <button onClick={addExp} disabled={syncing} style={{opacity:syncing?0.6:1,background:"#E8544A",border:"none",borderRadius:14,padding:"15px",color:"#fff",fontSize:16,fontWeight:800,cursor:"pointer",boxShadow:"0 4px 14px rgba(232,84,74,0.35)",letterSpacing:0.3}}>Lançar Gasto</button>
               </div>
             )}
 
@@ -950,7 +1017,7 @@ function MainApp({user, onLogout}) {
                   </div>
                 </div>
 
-                <button onClick={addInc} style={{background:"#00A86B",border:"none",borderRadius:14,padding:"15px",color:"#fff",fontSize:16,fontWeight:800,cursor:"pointer",boxShadow:"0 4px 14px rgba(0,168,107,0.35)",letterSpacing:0.3}}>Registrar Entrada</button>
+                <button onClick={addInc} disabled={syncing} style={{opacity:syncing?0.6:1,background:"#00A86B",border:"none",borderRadius:14,padding:"15px",color:"#fff",fontSize:16,fontWeight:800,cursor:"pointer",boxShadow:"0 4px 14px rgba(0,168,107,0.35)",letterSpacing:0.3}}>Registrar Entrada</button>
               </div>
             )}
           </div>
@@ -974,7 +1041,7 @@ function MainApp({user, onLogout}) {
                 <div style={{background:"#F5F0FF",borderRadius:14,padding:"12px 16px",marginBottom:12,border:"1px solid #E0D5FF",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <div>
                     <div style={{fontSize:13,fontWeight:700,color:"#6C5CE7"}}>{effRows.length} a importar · {reviewRows.length} no arquivo</div>
-                    <div style={{fontSize:11,color:"#6C5CE7",marginTop:2}}>{matchedCount} já com categoria aprendida{dupSkipped>0?" · "+dupSkipped+" duplicados ignorados":""}{invalidCount>0?" · "+invalidCount+" inválidos":""}{paySkipped>0?" · "+paySkipped+" pagamentos de fatura ignorados":""}</div>
+                    <div style={{fontSize:11,color:"#6C5CE7",marginTop:2}}>{matchedCount} já com categoria aprendida{dupSkipped>0?" · "+dupSkipped+" duplicados ignorados":""}{invalidCount>0?" · "+invalidCount+" inválidos":""}{paySkipped>0?" · "+paySkipped+" pagamentos de fatura ignorados":""}{manualCount>0?" · "+manualCount+" manuais a substituir":""}</div>
                   </div>
                   <div style={{fontSize:16,fontWeight:800,color:importTotal>=0?"#00A86B":"#E8544A"}}>{fmt(importTotal)}</div>
                 </div>
@@ -1042,6 +1109,15 @@ function MainApp({user, onLogout}) {
                       <div style={{display:"inline-flex",alignItems:"center",gap:6,marginBottom:8,marginRight:6}}>
                         <span style={{fontSize:10,color:"#6C5CE7",background:"#F5F0FF",padding:"2px 8px",borderRadius:20,fontWeight:700}}>💳 pagamento de fatura — ignorado (evita contar em dobro)</span>
                         <button onClick={()=>updateRow(idx,{forceInclude:!row.forceInclude})} style={{fontSize:10,background:"transparent",border:"1px solid #E8E8E8",borderRadius:20,padding:"2px 8px",color:"#8E8E9A",cursor:"pointer",fontWeight:600}}>{row.forceInclude?"Ignorar":"Importar mesmo assim"}</button>
+                      </div>
+                    )}
+                    {rowStatus[idx]&&rowStatus[idx].manual&&(
+                      <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:8}}>
+                        <span style={{fontSize:10,color:"#B7791F",background:"#FFF8E6",padding:"2px 8px",borderRadius:20,fontWeight:700}}>{"✏️ parece o lançamento manual “"+rowStatus[idx].manual.desc+"” de "+(rowStatus[idx].manual.date||"").split("-").reverse().join("/")}</span>
+                        {[["replace","Substituir o manual"],["keep","Manter os dois"]].map(([v,l])=>{
+                          const on=(row.manualAction||"replace")===v;
+                          return <button key={v} onClick={()=>updateRow(idx,{manualAction:v})} style={{fontSize:10,background:on?"#1a1a2e":"transparent",color:on?"#fff":"#8E8E9A",border:"1px solid "+(on?"#1a1a2e":"#E8E8E8"),borderRadius:20,padding:"2px 8px",cursor:"pointer",fontWeight:600}}>{l}</button>;
+                        })}
                       </div>
                     )}
                     {PMS.find(p=>p.id===row.pm)?.isCard&&row.billSource==="auto"&&<div style={{fontSize:10,color:"#B7791F",background:"#FFF8E6",display:"inline-block",padding:"2px 8px",borderRadius:20,marginBottom:8,marginRight:6,fontWeight:600}}>{row.isInstallment?"parcela — confira a fatura":"fatura estimada"}</div>}
