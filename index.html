@@ -57,6 +57,17 @@ function billingMonth(dateStr, closeDay = 31) {
   while (m > 11) { m -= 12; y++; }
   return { month:m, year:y };
 }
+function todayLocal() {
+  const d = new Date();
+  return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
+}
+const MOV_TYPES = [
+  {id:"aporte",     l:"Aporte",     c:"#00A86B"},
+  {id:"rendimento", l:"Rendimento", c:"#6C5CE7"},
+  {id:"retirada",   l:"Retirada",   c:"#E8544A"},
+];
+// Quanto a movimentação soma (ou tira) do saldo da conta.
+function movDelta(m) { return (m.type||"aporte")==="retirada" ? -m.amount : m.amount; }
 function closeDayOf(pmId) { return PMS.find(p=>p.id===pmId)?.closeDay ?? 31; }
 function billingFor(dateStr, pmId) { return billingMonth(dateStr, closeDayOf(pmId)); }
 
@@ -348,12 +359,16 @@ function MainApp({user, onLogout}) {
   const [bulkBill, setBulkBill] = useState({month:now.getMonth(), year:now.getFullYear()});
   const fileInputRef = useRef(null);
   const addLock = useRef(false);
+  const [editAcc, setEditAcc] = useState(null);
+  const [editMov, setEditMov] = useState(null);
+  const [movAcc,  setMovAcc]  = useState("all");
+  const [showAllMov, setShowAllMov] = useState(false);
   const [efBillSel, setEfBillSel] = useState({on:false, month:0, year:now.getFullYear()});
 
   const today = now.toISOString().split("T")[0];
   const [ef,   setEf]   = useState({desc:"",amt:"",cat:"mercado",pm:"corrente",person:"p1",date:today});
   const [inf,  setInf]  = useState({desc:"",amt:"",type:"salario",person:"p1",date:today});
-  const [invF, setInvF] = useState({accId:"",amt:"",month:now.getMonth(),year:now.getFullYear()});
+  const [invF, setInvF] = useState({accId:"",amt:"",type:"aporte",date:todayLocal(),obs:""});
   const [newA, setNewA] = useState({name:"",inst:"",bal:""});
 
   const flash    = msg => { setOk(msg);    setTimeout(()=>setOk(""),   2500); };
@@ -466,12 +481,26 @@ function MainApp({user, onLogout}) {
   const diffP     = prevT>0?((diff/prevT)*100).toFixed(1):null;
 
   const totInv   = accounts.reduce((s,a)=>s+a.balance,0);
-  const totContr = contribs.reduce((s,c)=>s+c.amount,0);
+  const aportes  = contribs.filter(c=>(c.type||"aporte")==="aporte");
+  const totContr = aportes.reduce((s,c)=>s+c.amount,0);
+  const totRend  = contribs.filter(c=>c.type==="rendimento").reduce((s,c)=>s+c.amount,0);
+  const totRet   = contribs.filter(c=>c.type==="retirada").reduce((s,c)=>s+c.amount,0);
   const cByM = useMemo(()=>{
     const m={};
-    contribs.forEach(c=>{const k=c.year+"-"+String(c.month).padStart(2,"0");m[k]=(m[k]||0)+c.amount;});
-    return Object.entries(m).sort(([a],[b])=>a.localeCompare(b)).map(([k,t])=>{const[y,mo]=k.split("-");return{label:MONTHS[parseInt(mo)]+" "+y,total:t};});
+    contribs.forEach(c=>{
+      if(c.year==null||c.month==null) return;
+      const k=c.year+"-"+String(c.month).padStart(2,"0");
+      if(!m[k]) m[k]={total:0,rend:0,ret:0};
+      const t=c.type||"aporte";
+      if(t==="aporte") m[k].total+=c.amount; else if(t==="rendimento") m[k].rend+=c.amount; else m[k].ret+=c.amount;
+    });
+    return Object.entries(m).sort(([a],[b])=>b.localeCompare(a)).slice(0,12).map(([k,v])=>{const[y,mo]=k.split("-");return{label:MONTHS[parseInt(mo)]+" "+y,...v};});
   },[contribs]);
+  const movList = useMemo(()=>contribs
+    .filter(c=>movAcc==="all"||c.accId===movAcc)
+    .slice()
+    .sort((a,b)=>String(b.date||"").localeCompare(String(a.date||"")) || String(b.createdAt||"").localeCompare(String(a.createdAt||""))),
+    [contribs,movAcc]);
   const maxC    = cByM.reduce((m,c)=>Math.max(m,c.total),1);
   const maxCat  = byCat.length>0?byCat[0].total:1;
   const maxType = byType.length>0?byType[0].total:1;
@@ -569,7 +598,22 @@ function MainApp({user, onLogout}) {
 
   const delExp = async id=>await db.collection("expenses").doc(id).delete();
   const delInc = async id=>await db.collection("incomes").doc(id).delete();
-  const delAcc = async id=>await db.collection("accounts").doc(id).delete();
+  const delAcc = async id=>{
+    const a=accounts.find(x=>x.id===id);
+    const movs=contribs.filter(c=>c.accId===id);
+    if(!window.confirm('Remover a conta "'+(a?a.name:"")+'"'+(movs.length?" e as "+movs.length+" movimentações dela":"")+"? Isso não pode ser desfeito (baixe um backup antes, se quiser).")) return;
+    setSyncing(true);
+    try{
+      const refs=[...movs.map(m=>db.collection("contribs").doc(m.id)), db.collection("accounts").doc(id)];
+      for(let i=0;i<refs.length;i+=400){
+        const b=db.batch();
+        refs.slice(i,i+400).forEach(r=>b.delete(r));
+        await b.commit();
+      }
+      flashInv("Conta removida ✓");
+    }catch(err){ flashInv("Não consegui remover. Tente de novo."); }
+    setSyncing(false);
+  };
 
   const addAcc = async()=>{
     if(!newA.name||!newA.bal) return;
@@ -586,17 +630,94 @@ function MainApp({user, onLogout}) {
     flashInv("Conta adicionada! ✓");
   };
 
+  const inc = n => firebase.firestore.FieldValue.increment(parseFloat(n.toFixed(2)));
+  const validMov = (type,amt) => !isNaN(amt) && amt!==0 && (type==="rendimento" || amt>0);
+
   const addContr = async()=>{
-    if(!invF.accId||!invF.amt||parseFloat(invF.amt)<=0) return;
+    if(addLock.current) return;
+    const amt=parseFloat(invF.amt);
+    if(!invF.accId||!invF.date||!validMov(invF.type,amt)){ flashInv("Confira a conta, o valor e a data."); return; }
+    addLock.current=true; setSyncing(true);
+    try{
+      const d=new Date(invF.date+"T12:00:00");
+      const amount=parseFloat(amt.toFixed(2));
+      const batch=db.batch();
+      batch.set(db.collection("contribs").doc(),{
+        accId:invF.accId, type:invF.type, amount,
+        month:d.getMonth(), year:d.getFullYear(), date:invF.date,
+        obs:(invF.obs||"").trim(), affectsBalance:true,
+        createdAt:new Date().toISOString()
+      });
+      batch.update(db.collection("accounts").doc(invF.accId),{balance:inc(movDelta({type:invF.type,amount}))});
+      await batch.commit();
+      setInvF(f=>({...f,amt:"",obs:""}));
+      flashInv((MOV_TYPES.find(t=>t.id===invF.type)?.l||"Movimentação")+" registrado! ✓");
+    }catch(err){ flashInv("Não consegui registrar. Tente de novo."); }
+    setSyncing(false); addLock.current=false;
+  };
+
+  const saveAcc = async f=>{
+    const orig=accounts.find(a=>a.id===f.id);
+    const newBal=parseFloat(parseFloat(f.bal).toFixed(2));
+    if(!orig||isNaN(newBal)||!String(f.name).trim()){ flashInv("Confira o nome e o saldo."); return; }
+    const diff=parseFloat((newBal-orig.balance).toFixed(2));
     setSyncing(true);
-    await db.collection("contribs").add({
-      accId:invF.accId, month:parseInt(invF.month), year:parseInt(invF.year),
-      amount:parseFloat(parseFloat(invF.amt).toFixed(2)),
-      date:new Date().toISOString().split("T")[0],
-      createdAt:new Date().toISOString()
-    });
-    setInvF(f=>({...f,amt:""})); setSyncing(false);
-    flashInv("Aporte registrado! ✓");
+    try{
+      const batch=db.batch();
+      batch.update(db.collection("accounts").doc(f.id),{name:String(f.name).trim(), inst:String(f.inst||"").trim(), balance:newBal});
+      if(f.recDiff && Math.abs(diff)>=0.005){
+        const d=new Date();
+        batch.set(db.collection("contribs").doc(),{
+          accId:f.id, type:"rendimento", amount:diff,
+          month:d.getMonth(), year:d.getFullYear(), date:todayLocal(),
+          obs:"Ajuste de saldo", affectsBalance:true, createdAt:new Date().toISOString()
+        });
+      }
+      await batch.commit();
+      setEditAcc(null); flashInv("Conta atualizada! ✓");
+    }catch(err){ flashInv("Não consegui salvar. Tente de novo."); }
+    setSyncing(false);
+  };
+
+  const saveMov = async f=>{
+    const orig=contribs.find(c=>c.id===f.id);
+    const amt=parseFloat(f.amt);
+    if(!orig||!f.accId||!f.date||!validMov(f.type,amt)){ flashInv("Confira a conta, o valor e a data."); return; }
+    const amount=parseFloat(amt.toFixed(2));
+    setSyncing(true);
+    try{
+      const d=new Date(f.date+"T12:00:00");
+      const batch=db.batch();
+      batch.update(db.collection("contribs").doc(f.id),{
+        accId:f.accId, type:f.type, amount, date:f.date,
+        month:d.getMonth(), year:d.getFullYear(), obs:String(f.obs||"").trim()
+      });
+      if(orig.affectsBalance){
+        const oldD=movDelta(orig), newD=movDelta({type:f.type,amount});
+        if(orig.accId===f.accId){
+          if(Math.abs(newD-oldD)>=0.005) batch.update(db.collection("accounts").doc(f.accId),{balance:inc(newD-oldD)});
+        } else {
+          batch.update(db.collection("accounts").doc(orig.accId),{balance:inc(-oldD)});
+          batch.update(db.collection("accounts").doc(f.accId),{balance:inc(newD)});
+        }
+      }
+      await batch.commit();
+      setEditMov(null); flashInv("Movimentação atualizada! ✓");
+    }catch(err){ flashInv("Não consegui salvar. Tente de novo."); }
+    setSyncing(false);
+  };
+
+  const delMov = async m=>{
+    if(!window.confirm("Excluir esta movimentação"+(m.affectsBalance?" e desfazer o efeito dela no saldo da conta":"")+"?")) return;
+    setSyncing(true);
+    try{
+      const batch=db.batch();
+      batch.delete(db.collection("contribs").doc(m.id));
+      if(m.affectsBalance) batch.update(db.collection("accounts").doc(m.accId),{balance:inc(-movDelta(m))});
+      await batch.commit();
+      setEditMov(null); flashInv("Movimentação excluída ✓");
+    }catch(err){ flashInv("Não consegui excluir. Tente de novo."); }
+    setSyncing(false);
   };
 
   // ── IMPORTAÇÃO EM MASSA ──
@@ -840,6 +961,8 @@ function MainApp({user, onLogout}) {
 
       <Toast msg={ok||invOk}/>
       {confirmDel&&<ConfirmDialog msg={confirmDel.msg} onConfirm={()=>{confirmDel.onConfirm();setConfirmDel(null);}} onCancel={()=>setConfirmDel(null)}/>}
+      {editAcc&&<EditAccModal acc={editAcc} onSave={saveAcc} onClose={()=>setEditAcc(null)}/>}
+      {editMov&&<EditMoveModal mov={editMov} accounts={accounts} onSave={saveMov} onDelete={()=>delMov(editMov)} onClose={()=>setEditMov(null)}/>}
       {editExp&&<EditExpModal exp={editExp} onSave={async(f)=>{setEditExp(f);setSyncing(true);const d=new Date(f.date+'T12:00:00');const isCard=PMS.find(p=>p.id===f.pm)?.isCard||false;const origE=expenses.find(x=>x.id===f.id);const keepBill=isCard&&origE&&origE.isCard&&origE.billMonth!=null&&origE.billYear!=null&&origE.date===f.date;const bill=keepBill?{month:origE.billMonth,year:origE.billYear}:(isCard?billingFor(f.date,f.pm):null);await db.collection('expenses').doc(f.id).update({date:f.date,month:d.getMonth(),year:d.getFullYear(),desc:f.desc,cat:f.cat,pm:f.pm,person:f.person,amount:parseFloat(parseFloat(f.amt).toFixed(2)),isCard,billMonth:isCard?bill.month:null,billYear:isCard?bill.year:null});setEditExp(null);setSyncing(false);flash('Gasto atualizado! ✓');}} onClose={()=>setEditExp(null)}/>}
       {editInc&&<EditIncModal inc={editInc} onSave={async(f)=>{setSyncing(true);const d=new Date(f.date+'T12:00:00');await db.collection('incomes').doc(f.id).update({date:f.date,month:d.getMonth(),year:d.getFullYear(),desc:f.desc,type:f.type,person:f.person,amount:parseFloat(parseFloat(f.amt).toFixed(2))});setEditInc(null);setSyncing(false);flash('Entrada atualizada! ✓');}} onClose={()=>setEditInc(null)}/>}
 
@@ -1481,7 +1604,17 @@ function MainApp({user, onLogout}) {
               <div style={{background:"#fff",borderRadius:16,padding:"15px",boxShadow:shadow,border:"1px solid #EBEBEB"}}>
                 <div style={{fontSize:10,color:"#00A86B",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:6}}>Aportado</div>
                 <div style={{fontSize:20,fontWeight:800,color:"#1a1a2e"}}>{fmt(totContr)}</div>
-                <div style={{fontSize:11,color:"#8E8E9A",marginTop:3}}>{contribs.length} aportes</div>
+                <div style={{fontSize:11,color:"#8E8E9A",marginTop:3}}>{aportes.length} aportes</div>
+              </div>
+              <div style={{background:"#fff",borderRadius:16,padding:"15px",boxShadow:shadow,border:"1px solid #EBEBEB"}}>
+                <div style={{fontSize:10,color:"#6C5CE7",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:6}}>Rendimentos</div>
+                <div style={{fontSize:20,fontWeight:800,color:totRend<0?"#E8544A":"#1a1a2e"}}>{fmt(totRend)}</div>
+                <div style={{fontSize:11,color:"#8E8E9A",marginTop:3}}>{contribs.filter(c=>c.type==="rendimento").length} lançamentos</div>
+              </div>
+              <div style={{background:"#fff",borderRadius:16,padding:"15px",boxShadow:shadow,border:"1px solid #EBEBEB"}}>
+                <div style={{fontSize:10,color:"#E8544A",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:6}}>Retiradas</div>
+                <div style={{fontSize:20,fontWeight:800,color:"#1a1a2e"}}>{fmt(totRet)}</div>
+                <div style={{fontSize:11,color:"#8E8E9A",marginTop:3}}>{contribs.filter(c=>c.type==="retirada").length} retiradas</div>
               </div>
             </div>
 
@@ -1503,7 +1636,8 @@ function MainApp({user, onLogout}) {
 
               {accounts.map(a=>{
                 const pct=totInv>0?((a.balance/totInv)*100).toFixed(1):0;
-                const ac=contribs.filter(c=>c.accId===a.id).reduce((s,c)=>s+c.amount,0);
+                const ac=contribs.filter(c=>c.accId===a.id&&(c.type||"aporte")==="aporte").reduce((s,c)=>s+c.amount,0);
+                const rd=contribs.filter(c=>c.accId===a.id&&c.type==="rendimento").reduce((s,c)=>s+c.amount,0);
                 return (
                   <div key={a.id} style={{borderBottom:"1px solid #F5F5F5",paddingBottom:14,marginBottom:14}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
@@ -1517,41 +1651,84 @@ function MainApp({user, onLogout}) {
                       <div style={{textAlign:"right"}}>
                         <div style={{fontSize:16,fontWeight:800,color:a.color}}>{fmt(a.balance)}</div>
                         <div style={{fontSize:11,color:"#8E8E9A",marginTop:1}}>{pct}% do portfólio</div>
-                        <button onClick={()=>delAcc(a.id)} style={{background:"transparent",border:"none",color:"#D1D1D1",fontSize:13,cursor:"pointer",marginTop:4}}>✕ Remover</button>
+                        <div style={{display:"flex",gap:12,justifyContent:"flex-end",marginTop:4}}>
+                          <button onClick={()=>setEditAcc(a)} style={{background:"transparent",border:"none",color:"#6C5CE7",fontSize:13,fontWeight:700,cursor:"pointer"}}>✏️ Editar</button>
+                          <button onClick={()=>delAcc(a.id)} style={{background:"transparent",border:"none",color:"#D1D1D1",fontSize:13,cursor:"pointer"}}>✕ Remover</button>
+                        </div>
                       </div>
                     </div>
                     <div style={{background:"#F5F5F3",borderRadius:99,height:6,overflow:"hidden"}}>
                       <div style={{background:a.color,height:"100%",width:pct+"%",borderRadius:99,transition:"width 0.4s"}}/>
                     </div>
-                    <div style={{fontSize:11,color:"#8E8E9A",marginTop:5}}>Total aportado: <span style={{color:a.color,fontWeight:700}}>{fmt(ac)}</span></div>
+                    <div style={{fontSize:11,color:"#8E8E9A",marginTop:5}}>Total aportado: <span style={{color:a.color,fontWeight:700}}>{fmt(ac)}</span>{rd!==0&&<span> · Rendimentos: <span style={{color:rd<0?"#E8544A":a.color,fontWeight:700}}>{fmt(rd)}</span></span>}</div>
                   </div>
                 );
               })}
               {accounts.length===0&&<div style={{color:"#8E8E9A",textAlign:"center",padding:"20px 0",fontSize:13}}>Nenhuma conta cadastrada ainda</div>}
             </div>
 
-            {/* Registrar aporte */}
+            {/* Registrar movimentação */}
             <div style={{background:"#fff",borderRadius:16,padding:16,marginBottom:14,boxShadow:shadow,border:"1px solid #EBEBEB"}}>
-              <div style={{fontSize:11,color:"#8E8E9A",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:12}}>Registrar aporte</div>
+              <div style={{fontSize:11,color:"#8E8E9A",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:12}}>Registrar movimentação</div>
               <div style={{display:"flex",flexDirection:"column",gap:10}}>
                 <select value={invF.accId} onChange={e=>setInvF(f=>({...f,accId:e.target.value}))} style={{...IS,padding:"13px 14px"}}>
                   <option value="">Selecione a conta...</option>
                   {accounts.map(a=><option key={a.id} value={a.id}>{a.name} — {a.inst}</option>)}
                 </select>
-                <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:10}}>
-                  <input placeholder="Valor" type="number" value={invF.amt} onChange={e=>setInvF(f=>({...f,amt:e.target.value}))} style={IS}/>
-                  <select value={invF.month} onChange={e=>setInvF(f=>({...f,month:e.target.value}))} style={{...SS,padding:"13px 12px"}}>
-                    {MONTHS.map((m,i)=><option key={i} value={i}>{m}</option>)}
-                  </select>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+                  {MOV_TYPES.map(t=>(
+                    <button key={t.id} onClick={()=>setInvF(f=>({...f,type:t.id}))} style={{background:invF.type===t.id?t.c:t.c+"10",border:"2px solid "+(invF.type===t.id?t.c:t.c+"25"),borderRadius:12,padding:"11px 4px",color:invF.type===t.id?"#fff":t.c,fontSize:13,fontWeight:700,cursor:"pointer"}}>{t.l}</button>
+                  ))}
                 </div>
-                <button onClick={addContr} style={{background:"#00A86B",border:"none",borderRadius:12,padding:13,color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer",boxShadow:"0 4px 12px rgba(0,168,107,0.3)"}}>Registrar Aporte</button>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                  <input placeholder={invF.type==="rendimento"?"Valor (pode ser negativo)":"Valor"} type="number" step="0.01" value={invF.amt} onChange={e=>setInvF(f=>({...f,amt:e.target.value}))} style={IS}/>
+                  <input type="date" value={invF.date} onChange={e=>setInvF(f=>({...f,date:e.target.value}))} style={IS}/>
+                </div>
+                <input placeholder="Observação (opcional): ex. aporte externo, CDI de setembro" value={invF.obs} onChange={e=>setInvF(f=>({...f,obs:e.target.value}))} style={IS}/>
+                <button onClick={addContr} disabled={syncing} style={{opacity:syncing?0.6:1,background:(MOV_TYPES.find(t=>t.id===invF.type)||MOV_TYPES[0]).c,border:"none",borderRadius:12,padding:13,color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer"}}>Registrar {(MOV_TYPES.find(t=>t.id===invF.type)||MOV_TYPES[0]).l}</button>
+                <div style={{fontSize:10,color:"#B0B0C0",lineHeight:1.5}}>Aporte e rendimento somam no saldo da conta; retirada subtrai. Para acertar o saldo com o extrato, use "Editar" na conta.</div>
               </div>
             </div>
 
-            {/* Histórico de aportes */}
+            {/* Movimentações */}
+            <div style={{background:"#fff",borderRadius:16,padding:16,marginBottom:14,boxShadow:shadow,border:"1px solid #EBEBEB"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,gap:8}}>
+                <div style={{fontSize:11,color:"#8E8E9A",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase"}}>Movimentações</div>
+                <select value={movAcc} onChange={e=>{setMovAcc(e.target.value);setShowAllMov(false);}} style={{...SS,maxWidth:170}}>
+                  <option value="all">Todas as contas</option>
+                  {accounts.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+              </div>
+              {movList.length===0&&<div style={{color:"#8E8E9A",textAlign:"center",padding:"14px 0",fontSize:13}}>Nenhuma movimentação ainda</div>}
+              {(showAllMov?movList:movList.slice(0,30)).map(c=>{
+                const a=accounts.find(x=>x.id===c.accId);
+                const t=MOV_TYPES.find(x=>x.id===(c.type||"aporte"))||MOV_TYPES[0];
+                const delta=movDelta(c);
+                return (
+                  <div key={c.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,padding:"10px 0",borderTop:"1px solid #F5F5F5"}}>
+                    <div style={{minWidth:0}}>
+                      <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                        <span style={{fontSize:10,fontWeight:700,color:t.c,background:t.c+"15",padding:"2px 8px",borderRadius:20}}>{t.l}</span>
+                        <span style={{fontSize:13,fontWeight:600,color:"#1a1a2e"}}>{a?a.name:"Conta removida"}</span>
+                      </div>
+                      <div style={{fontSize:11,color:"#8E8E9A",marginTop:3,lineHeight:1.5}}>
+                        {(c.date||"").split("-").reverse().join("/")||(MONTHS[c.month]+" "+c.year)}{c.obs?" · "+c.obs:""}{!c.affectsBalance?" · antigo (não altera o saldo)":""}
+                      </div>
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                      <span style={{fontSize:14,fontWeight:800,color:delta<0?"#E8544A":t.c}}>{delta<0?"−":"+"}{fmt(Math.abs(delta))}</span>
+                      <button title="Editar movimentação" onClick={()=>setEditMov(c)} style={{background:"transparent",border:"none",fontSize:15,cursor:"pointer"}}>✏️</button>
+                    </div>
+                  </div>
+                );
+              })}
+              {!showAllMov&&movList.length>30&&<button onClick={()=>setShowAllMov(true)} style={{marginTop:8,width:"100%",background:"#F5F5F3",border:"none",borderRadius:10,padding:10,fontSize:12,fontWeight:700,color:"#6C5CE7",cursor:"pointer"}}>Mostrar todas ({movList.length})</button>}
+            </div>
+
+            {/* Resumo por mês */}
             {cByM.length>0&&(
               <div style={{background:"#fff",borderRadius:16,padding:16,boxShadow:shadow,border:"1px solid #EBEBEB"}}>
-                <div style={{fontSize:11,color:"#8E8E9A",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:12}}>Aportes por mês</div>
+                <div style={{fontSize:11,color:"#8E8E9A",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:12}}>Resumo por mês</div>
                 {cByM.map((c,i)=>(
                   <div key={i} style={{marginBottom:12}}>
                     <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
@@ -1559,6 +1736,13 @@ function MainApp({user, onLogout}) {
                       <span style={{fontSize:13,fontWeight:700,color:"#00A86B"}}>{fmt(c.total)}</span>
                     </div>
                     <Bar value={c.total} max={maxC} color="#00A86B"/>
+                    {(c.rend!==0||c.ret!==0)&&(
+                      <div style={{fontSize:11,color:"#8E8E9A",marginTop:5}}>
+                        {c.rend!==0&&<span>Rendimentos: <span style={{color:c.rend<0?"#E8544A":"#6C5CE7",fontWeight:700}}>{fmt(c.rend)}</span></span>}
+                        {c.rend!==0&&c.ret!==0&&" · "}
+                        {c.ret!==0&&<span>Retiradas: <span style={{color:"#E8544A",fontWeight:700}}>{fmt(c.ret)}</span></span>}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1566,6 +1750,69 @@ function MainApp({user, onLogout}) {
           </div>
         )}
 
+      </div>
+    </div>
+  );
+}
+
+function EditAccModal({acc, onSave, onClose}) {
+  const [f, setF] = useState({id:acc.id, name:acc.name||"", inst:acc.inst||"", bal:String(parseFloat((acc.balance||0).toFixed(2))), recDiff:true});
+  const newBal = parseFloat(f.bal);
+  const diff = isNaN(newBal) ? 0 : parseFloat((newBal-acc.balance).toFixed(2));
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={onClose}>
+      <div style={{background:"#F5F5F3",borderRadius:"20px 20px 0 0",width:"100%",maxWidth:430,maxHeight:"90vh",overflowY:"auto",padding:"20px 14px 40px",animation:"slideDown 0.25s ease"}} onClick={e=>e.stopPropagation()}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+          <div style={{fontSize:16,fontWeight:800,color:"#1a1a2e"}}>✏️ Editar conta</div>
+          <button onClick={onClose} style={{background:"#EBEBEB",border:"none",borderRadius:20,width:32,height:32,fontSize:16,cursor:"pointer",color:"#8E8E9A"}}>✕</button>
+        </div>
+        <div style={{background:"#fff",borderRadius:16,padding:16,boxShadow:shadow,border:"1px solid #EBEBEB",display:"flex",flexDirection:"column",gap:12}}>
+          <input placeholder="Nome (ex: Tesouro Selic)" value={f.name} onChange={e=>setF(v=>({...v,name:e.target.value}))} style={IS}/>
+          <input placeholder="Instituição (ex: XP)" value={f.inst} onChange={e=>setF(v=>({...v,inst:e.target.value}))} style={IS}/>
+          <div>
+            <div style={{fontSize:11,color:"#8E8E9A",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:6}}>Saldo atual</div>
+            <input placeholder="Saldo atual" type="number" step="0.01" value={f.bal} onChange={e=>setF(v=>({...v,bal:e.target.value}))} style={IS}/>
+          </div>
+          {Math.abs(diff)>=0.005&&(
+            <label style={{display:"flex",gap:10,alignItems:"flex-start",fontSize:12,color:"#4a4a6a",lineHeight:1.6,cursor:"pointer"}}>
+              <input type="checkbox" checked={f.recDiff} onChange={e=>setF(v=>({...v,recDiff:e.target.checked}))} style={{marginTop:3}}/>
+              <span>Registrar a diferença ({diff>0?"+":"−"}{fmt(Math.abs(diff))}) como <strong>rendimento</strong>. Desmarque se foi um aporte ou uma correção: aí só o saldo muda.</span>
+            </label>
+          )}
+        </div>
+        <button onClick={()=>onSave(f)} style={{marginTop:14,width:"100%",background:"#F59E0B",border:"none",borderRadius:14,padding:15,color:"#fff",fontSize:16,fontWeight:800,cursor:"pointer"}}>Salvar</button>
+      </div>
+    </div>
+  );
+}
+
+function EditMoveModal({mov, accounts, onSave, onDelete, onClose}) {
+  const [f, setF] = useState({id:mov.id, accId:mov.accId, type:mov.type||"aporte", amt:String(mov.amount), date:mov.date||todayLocal(), obs:mov.obs||""});
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={onClose}>
+      <div style={{background:"#F5F5F3",borderRadius:"20px 20px 0 0",width:"100%",maxWidth:430,maxHeight:"90vh",overflowY:"auto",padding:"20px 14px 40px",animation:"slideDown 0.25s ease"}} onClick={e=>e.stopPropagation()}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+          <div style={{fontSize:16,fontWeight:800,color:"#1a1a2e"}}>✏️ Editar movimentação</div>
+          <button onClick={onClose} style={{background:"#EBEBEB",border:"none",borderRadius:20,width:32,height:32,fontSize:16,cursor:"pointer",color:"#8E8E9A"}}>✕</button>
+        </div>
+        <div style={{background:"#fff",borderRadius:16,padding:16,boxShadow:shadow,border:"1px solid #EBEBEB",display:"flex",flexDirection:"column",gap:12}}>
+          <select value={f.accId} onChange={e=>setF(v=>({...v,accId:e.target.value}))} style={{...IS,padding:"13px 14px"}}>
+            {accounts.map(a=><option key={a.id} value={a.id}>{a.name} — {a.inst}</option>)}
+          </select>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+            {MOV_TYPES.map(t=>(
+              <button key={t.id} onClick={()=>setF(v=>({...v,type:t.id}))} style={{background:f.type===t.id?t.c:t.c+"10",border:"2px solid "+(f.type===t.id?t.c:t.c+"25"),borderRadius:12,padding:"11px 4px",color:f.type===t.id?"#fff":t.c,fontSize:13,fontWeight:700,cursor:"pointer"}}>{t.l}</button>
+            ))}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            <input placeholder="Valor" type="number" step="0.01" value={f.amt} onChange={e=>setF(v=>({...v,amt:e.target.value}))} style={IS}/>
+            <input type="date" value={f.date} onChange={e=>setF(v=>({...v,date:e.target.value}))} style={IS}/>
+          </div>
+          <input placeholder="Observação (opcional)" value={f.obs} onChange={e=>setF(v=>({...v,obs:e.target.value}))} style={IS}/>
+          {!mov.affectsBalance&&<div style={{fontSize:11,color:"#B7791F",background:"#FFF8E6",borderRadius:10,padding:"8px 10px",lineHeight:1.6}}>Registro antigo: editar ou apagar não altera o saldo da conta. Se precisar acertar o saldo, use "Editar" na conta.</div>}
+        </div>
+        <button onClick={()=>onSave(f)} style={{marginTop:14,width:"100%",background:"#6C5CE7",border:"none",borderRadius:14,padding:15,color:"#fff",fontSize:16,fontWeight:800,cursor:"pointer"}}>Salvar</button>
+        <button onClick={onDelete} style={{marginTop:10,width:"100%",background:"transparent",border:"1px solid #F5C6C2",borderRadius:14,padding:13,color:"#E8544A",fontSize:14,fontWeight:700,cursor:"pointer"}}>Excluir movimentação</button>
       </div>
     </div>
   );
