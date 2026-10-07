@@ -8,6 +8,7 @@
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
 <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -38,11 +39,65 @@ const firebaseConfig = {
 
 firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
+const auth = firebase.auth();
 
-function billingMonth(dateStr) {
+// E-mails com acesso ao app (opcional aqui — a trava de verdade está nas regras do Firestore, arquivo firestore.rules).
+// Se preencher, quem entrar com outro e-mail é deslogado automaticamente. Ex.: ["marcio@gmail.com","juliana@gmail.com"]
+const ALLOWED_EMAILS = [];
+
+// Descrições da conta corrente que indicam pagamento de fatura de cartão (ignoradas na importação para não contar em dobro).
+const CARD_PAYMENT_RE = /(pag(amento|to)?|pgto|debito)\s+(de\s+|do\s+|da\s+)?(fatura|cartao)|fatura\s+(do\s+)?cartao|cartao\s+de\s+credito|(fatura|pag\w*)[^\n]*\b(visa|mastercard|master)\b/;
+
+// Mês (0-11) e ano em que a compra será debitada, dado o dia de fechamento do cartão.
+// Compra até o dia de fechamento -> debita no mês seguinte; depois do fechamento -> daqui a 2 meses.
+function billingMonth(dateStr, closeDay = 31) {
   const d = new Date(dateStr + "T12:00:00");
-  const m = d.getMonth(), y = d.getFullYear();
-  return m === 11 ? { month:0, year:y+1 } : { month:m+1, year:y };
+  let m = d.getMonth() + 1 + (d.getDate() > closeDay ? 1 : 0);
+  let y = d.getFullYear();
+  while (m > 11) { m -= 12; y++; }
+  return { month:m, year:y };
+}
+function closeDayOf(pmId) { return PMS.find(p=>p.id===pmId)?.closeDay ?? 31; }
+function billingFor(dateStr, pmId) { return billingMonth(dateStr, closeDayOf(pmId)); }
+
+// Converte "1.234,56", "1234.56", "R$ 1.234,56" etc. em número (sempre positivo).
+function parseAmount(v) {
+  let s = String(v ?? "").trim();
+  if (!s) return 0;
+  s = s.replace(/[^0-9.,]/g, "");
+  const lc = s.lastIndexOf(","), ld = s.lastIndexOf(".");
+  if (lc > -1 && ld > -1) {
+    s = lc > ld ? s.replace(/\./g, "").replace(",", ".") : s.replace(/,/g, "");
+  } else if (lc > -1) {
+    s = (s.match(/,/g) || []).length === 1 ? s.replace(",", ".") : s.replace(/,/g, "");
+  } else if (ld > -1) {
+    if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, "");
+  }
+  const n = parseFloat(s);
+  return isNaN(n) ? 0 : Math.abs(n);
+}
+
+// Aceita AAAA-MM-DD, DD/MM/AAAA e DD/MM/AA.
+function parseDateStr(raw) {
+  const t = String(raw ?? "").trim();
+  let m = t.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return m[1]+"-"+m[2]+"-"+m[3];
+  m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) {
+    const y = m[3].length === 2 ? "20"+m[3] : m[3];
+    return y+"-"+m[2].padStart(2,"0")+"-"+m[1].padStart(2,"0");
+  }
+  return t;
+}
+
+// Chave para detectar lançamento já importado.
+function dupKey(r) {
+  return [
+    r.date,
+    String(r.desc || "").trim().toLowerCase().replace(/\s+/g, " "),
+    Number(r.amount).toFixed(2),
+    r.kind === "entrada" ? "entrada" : (r.pm || "corrente")
+  ].join("|");
 }
 
 function normalizeDesc(s) {
@@ -80,11 +135,13 @@ const ITYPES = [
   {id:"outro",     e:"📦", l:"Outro",     c:"#94A3B8"},
 ];
 
+// closeDay = dia de fechamento da fatura de cada cartão; dueDay = dia de vencimento (ajuste conforme o seu cartão).
+// Compra até esse dia entra na fatura que debita no mês seguinte; depois, na do mês subsequente.
 const PMS = [
   {id:"corrente", e:"🏦", l:"Conta Corrente", isCard:false},
-  {id:"card1",    e:"💳", l:"Cartão Casa",    isCard:true},
-  {id:"card2",    e:"💳", l:"Cartão Marcio",  isCard:true},
-  {id:"card3",    e:"💳", l:"Cartão Ju",      isCard:true},
+  {id:"card1",    e:"💳", l:"Cartão Casa",    isCard:true, closeDay:27, dueDay:10},
+  {id:"card2",    e:"💳", l:"Cartão Marcio",  isCard:true, closeDay:27, dueDay:10},
+  {id:"card3",    e:"💳", l:"Cartão Ju",      isCard:true, closeDay:27, dueDay:10},
 ];
 
 const PERSONS = [
@@ -151,7 +208,9 @@ function ConfirmDialog({msg, onConfirm, onCancel}) {
 
 function EditExpModal({exp, onSave, onClose}) {
   const [f, setF] = useState({...exp, amt:String(exp.amount)});
-  const bill = f.pm !== "corrente" && f.date ? billingMonth(f.date) : null;
+  const bill = f.pm !== "corrente" && f.date
+    ? ((exp.billMonth!=null && exp.billYear!=null && f.date===exp.date) ? {month:exp.billMonth, year:exp.billYear} : billingFor(f.date, f.pm))
+    : null;
   const pm = PMS.find(p=>p.id===f.pm);
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={onClose}>
@@ -258,7 +317,7 @@ function EditIncModal({inc, onSave, onClose}) {
   );
 }
 
-function App() {
+function MainApp({user, onLogout}) {
   const [expenses,  setExpenses]  = useState([]);
   const [incomes,   setIncomes]   = useState([]);
   const [accounts,  setAccounts]  = useState([]);
@@ -269,7 +328,11 @@ function App() {
   const [tab,       setTab]       = useState("add");
   const [mode,      setMode]      = useState("expense");
   const [month,     setMonth]     = useState(now.getMonth());
-  const [year]                    = useState(now.getFullYear());
+  const [year,setYear]              = useState(now.getFullYear());
+  const [loadErr,  setLoadErr]    = useState("");
+  const [expTotals,setExpTotals]  = useState({});
+  const [undoId,   setUndoId]     = useState(null);
+  const [lastBackup,setLastBackup]= useState(()=>{ try{ return localStorage.getItem("prosp_last_backup")||""; }catch(e){ return ""; } });
   const [ok,        setOk]        = useState("");
   const [invOk,     setInvOk]     = useState("");
   const [showAcc,   setShowAcc]   = useState(false);
@@ -282,6 +345,7 @@ function App() {
   const [confirmDel,setConfirmDel]= useState(null);
   const [reviewRows,setReviewRows]= useState([]);
   const [importErr, setImportErr] = useState("");
+  const [bulkBill, setBulkBill] = useState({month:now.getMonth(), year:now.getFullYear()});
   const fileInputRef = useRef(null);
 
   const today = now.toISOString().split("T")[0];
@@ -295,28 +359,75 @@ function App() {
 
   useEffect(()=>{
     let n=0; const done=()=>{ n++; if(n>=5) setLoading(false); };
-    const u1=db.collection("expenses").orderBy("date","desc").onSnapshot(s=>{setExpenses(s.docs.map(d=>({id:d.id,...d.data()}))); done();});
-    const u2=db.collection("incomes").orderBy("date","desc").onSnapshot(s=>{setIncomes(s.docs.map(d=>({id:d.id,...d.data()}))); done();});
-    const u3=db.collection("accounts").onSnapshot(s=>{setAccounts(s.docs.map(d=>({id:d.id,...d.data()}))); done();});
-    const u4=db.collection("contribs").orderBy("date","desc").onSnapshot(s=>{setContribs(s.docs.map(d=>({id:d.id,...d.data()}))); done();});
-    const u5=db.collection("categoryRules").onSnapshot(s=>{setCatRules(s.docs.map(d=>({id:d.id,...d.data()}))); done();});
+    const onErr=err=>{
+      console.error(err);
+      setLoadErr(err&&err.code==="permission-denied"
+        ? "Sem permissão para ler o banco. Confira as regras do Firestore e se o seu e-mail está liberado."
+        : "Erro ao carregar os dados ("+((err&&err.code)||"desconhecido")+").");
+      done();
+    };
+    const u1=db.collection("expenses").orderBy("date","desc").onSnapshot(s=>{setExpenses(s.docs.map(d=>({id:d.id,...d.data()}))); done();},onErr);
+    const u2=db.collection("incomes").orderBy("date","desc").onSnapshot(s=>{setIncomes(s.docs.map(d=>({id:d.id,...d.data()}))); done();},onErr);
+    const u3=db.collection("accounts").onSnapshot(s=>{setAccounts(s.docs.map(d=>({id:d.id,...d.data()}))); done();},onErr);
+    const u4=db.collection("contribs").orderBy("date","desc").onSnapshot(s=>{setContribs(s.docs.map(d=>({id:d.id,...d.data()}))); done();},onErr);
+    const u5=db.collection("categoryRules").onSnapshot(s=>{setCatRules(s.docs.map(d=>({id:d.id,...d.data()}))); done();},onErr);
     return ()=>{u1();u2();u3();u4();u5();};
   },[]);
 
   const mExp       = useMemo(()=>expenses.filter(e=>e.month===month&&e.year===year),[expenses,month,year]);
   const debitExp   = useMemo(()=>expenses.filter(e=>{ if(!e.isCard) return e.month===month&&e.year===year; return e.billMonth===month&&e.billYear===year; }),[expenses,month,year]);
-  const pendingCard= useMemo(()=>mExp.filter(e=>e.isCard),[mExp]);
+  const nextM      = month===11?0:month+1;
+  const nextY      = month===11?year+1:year;
+  const pendingCard= useMemo(()=>expenses.filter(e=>e.isCard&&e.billMonth===nextM&&e.billYear===nextY),[expenses,nextM,nextY]);
   const mInc       = useMemo(()=>incomes.filter(i=>i.month===month&&i.year===year),[incomes,month,year]);
   const totDebit   = debitExp.reduce((s,e)=>s+e.amount,0);
-  const totMExp    = mExp.reduce((s,e)=>s+e.amount,0);
+  const totMExp    = debitExp.reduce((s,e)=>s+e.amount,0);
   const totInc     = mInc.reduce((s,i)=>s+i.amount,0);
   const totPending = pendingCard.reduce((s,e)=>s+e.amount,0);
   const bal        = totInc - totDebit;
 
-  const fExp = useMemo(()=>mExp.filter(e=>(fCat==="all"||e.cat===fCat)&&(fPm==="all"||e.pm===fPm)&&(fPer==="all"||e.person===fPer)),[mExp,fCat,fPm,fPer]);
+  const fPmIsCard = PMS.find(p=>p.id===fPm)?.isCard||false;
+  // Ao filtrar por um cartão, a lista segue o MÊS DA FATURA (billMonth/billYear), não o mês da compra.
+  const fBase = useMemo(()=> fPmIsCard ? expenses.filter(e=>e.isCard&&e.billMonth===month&&e.billYear===year) : mExp,[fPmIsCard,expenses,mExp,month,year]);
+  const existingKeyCount = useMemo(()=>{
+    const m={};
+    expenses.forEach(e=>{ const k=dupKey({date:e.date,desc:e.desc,amount:e.amount,kind:"gasto",pm:e.pm}); m[k]=(m[k]||0)+1; });
+    incomes.forEach(i=>{ const k=dupKey({date:i.date,desc:i.desc,amount:i.amount,kind:"entrada"}); m[k]=(m[k]||0)+1; });
+    return m;
+  },[expenses,incomes]);
+  // Para cada linha da revisão: é duplicata de algo já gravado? é inválida? será ignorada?
+  // Contagem por ocorrência: duas compras idênticas no mesmo dia continuam valendo (só ignora o que já existe no banco).
+  const rowStatus = useMemo(()=>{
+    const seen={};
+    return reviewRows.map(r=>{
+      const k=dupKey(r); const n=seen[k]||0; seen[k]=n+1;
+      const dup=(existingKeyCount[k]||0)>n;
+      const isC = PMS.find(p=>p.id===r.pm)?.isCard;
+      const payment = r.kind==="gasto" && !isC && CARD_PAYMENT_RE.test(r.norm||"");
+      return {dup, payment, invalid:!!r.invalid, skip: !!r.invalid || ((dup||payment) && !r.forceInclude)};
+    });
+  },[reviewRows,existingKeyCount]);
+
+  const importBatches = useMemo(()=>{
+    const m={};
+    const add=(kind,d)=>{
+      if(d.importedFrom!=="import") return;
+      const id=d.importBatchId||("legacy_"+String(d.createdAt||"").slice(0,16));
+      if(!m[id]) m[id]={id,legacy:!d.importBatchId,createdAt:d.createdAt||"",exp:[],inc:[],gTotal:0,iTotal:0,pms:{},faturas:{}};
+      const b=m[id];
+      if(d.createdAt && (!b.createdAt || d.createdAt<b.createdAt)) b.createdAt=d.createdAt;
+      if(kind==="exp"){ b.exp.push(d.id); b.gTotal+=d.amount; b.pms[d.pm]=1; if(d.isCard&&d.billMonth!=null) b.faturas[MONTHS[d.billMonth]+"/"+d.billYear]=1; }
+      else { b.inc.push(d.id); b.iTotal+=d.amount; }
+    };
+    expenses.forEach(e=>add("exp",e));
+    incomes.forEach(i=>add("inc",i));
+    return Object.values(m).sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt))).slice(0,8);
+  },[expenses,incomes]);
+
+  const fExp = useMemo(()=>fBase.filter(e=>(fCat==="all"||e.cat===fCat)&&(fPm==="all"||e.pm===fPm)&&(fPer==="all"||e.person===fPer)),[fBase,fCat,fPm,fPer]);
   const fInc = useMemo(()=>mInc.filter(i=>(fPer==="all"||i.person===fPer)&&(fType==="all"||i.type===fType)),[mInc,fPer,fType]);
 
-  const byCat  = useMemo(()=>{const m={};mExp.forEach(e=>{m[e.cat]=(m[e.cat]||0)+e.amount});return CATS.map(c=>({...c,total:m[c.id]||0})).filter(c=>c.total>0).sort((a,b)=>b.total-a.total);},[mExp]);
+  const byCat  = useMemo(()=>{const m={};debitExp.forEach(e=>{m[e.cat]=(m[e.cat]||0)+e.amount});return CATS.map(c=>({...c,total:m[c.id]||0})).filter(c=>c.total>0).sort((a,b)=>b.total-a.total);},[debitExp]);
   const byType = useMemo(()=>{const m={};mInc.forEach(i=>{m[i.type]=(m[i.type]||0)+i.amount});return ITYPES.map(t=>({...t,total:m[t.id]||0})).filter(t=>t.total>0).sort((a,b)=>b.total-a.total);},[mInc]);
 
   const pDebit = p => debitExp.filter(e=>e.person===p).reduce((s,e)=>s+e.amount,0);
@@ -328,7 +439,7 @@ function App() {
   const prevInc   = incomes.filter(i=>i.month===prevM&&i.year===prevY);
   const prevT     = prevDebit.reduce((s,e)=>s+e.amount,0);
   const prevI     = prevInc.reduce((s,i)=>s+i.amount,0);
-  const prevExpByLaunch = expenses.filter(e=>e.month===prevM&&e.year===prevY);
+  const prevExpByLaunch = prevDebit;
   const prevBC    = useMemo(()=>{const m={};prevExpByLaunch.forEach(e=>{m[e.cat]=(m[e.cat]||0)+e.amount});return m;},[prevExpByLaunch]);
   const diff      = totDebit-prevT;
   const diffP     = prevT>0?((diff/prevT)*100).toFixed(1):null;
@@ -349,7 +460,7 @@ function App() {
     setSyncing(true);
     const d = new Date(ef.date+"T12:00:00");
     const isCard = PMS.find(p=>p.id===ef.pm)?.isCard||false;
-    const bill = isCard ? billingMonth(ef.date) : null;
+    const bill = isCard ? billingFor(ef.date, ef.pm) : null;
     await db.collection("expenses").add({
       date:ef.date, month:d.getMonth(), year:d.getFullYear(),
       desc:ef.desc, cat:ef.cat, pm:ef.pm, person:ef.person,
@@ -384,7 +495,9 @@ function App() {
     setSyncing(true);
     const d = new Date(editExp.date+"T12:00:00");
     const isCard = PMS.find(p=>p.id===editExp.pm)?.isCard||false;
-    const bill = isCard ? billingMonth(editExp.date) : null;
+    const origE = expenses.find(x=>x.id===editExp.id);
+    const keepBill = isCard && origE && origE.isCard && origE.billMonth!=null && origE.billYear!=null && origE.date===editExp.date;
+    const bill = keepBill ? {month:origE.billMonth, year:origE.billYear} : (isCard ? billingFor(editExp.date, editExp.pm) : null);
     await db.collection("expenses").doc(editExp.id).update({
       date:editExp.date, month:d.getMonth(), year:d.getFullYear(),
       desc:editExp.desc, cat:editExp.cat, pm:editExp.pm, person:editExp.person,
@@ -448,44 +561,53 @@ function App() {
       .filter(r => r && (r.data || r.Data) && (r.descricao || r.Descricao || r.Descrição))
       .map((r,i) => {
         const get = (...keys)=>{ for(const k of keys){ if(r[k]!==undefined && r[k]!==null && r[k]!=="") return r[k]; } return ""; };
-        const rawDate  = String(get("data","Data")).trim();
-        const date     = rawDate.includes("/") ? rawDate.split("/").reverse().join("-") : rawDate;
+        const date     = parseDateStr(get("data","Data"));
         const desc     = String(get("descricao","Descricao","Descrição")).trim();
-        const rawVal   = String(get("valor","Valor")).replace(/\./g,"").replace(",",".").replace(/[^0-9.\-]/g,"");
-        const amount   = Math.abs(parseFloat(String(get("valor","Valor")).replace(",",".")) || parseFloat(rawVal) || 0);
+        const amount   = parseAmount(get("valor","Valor"));
         const kindRaw  = String(get("tipo","Tipo")).toLowerCase().trim();
         const kind     = kindRaw==="entrada" ? "entrada" : "gasto";
         const origem   = String(get("origem","Origem")).trim() || "corrente";
         const pmObj    = PMS.find(p=>p.id===origem) || PMS[0];
         const norm     = normalizeDesc(desc);
         const rule     = catRules.find(cr=>cr.norm===norm);
+        const invalid  = !/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(new Date(date+"T12:00:00").getTime()) || !(amount>0);
+        const isInstallment = /parcela\s*\d+\s*\/\s*\d+/i.test(desc);
 
-        // Mês da fatura: se vier explícito no CSV (coluna "fatura", formato AAAA-MM),
-        // usamos ele direto — é mais confiável do que calcular pela data da compra,
-        // já que o fechamento real do cartão nem sempre bate com o fim do mês civil.
-        let billMonth = null, billYear = null;
-        if(pmObj.isCard){
+        // Mês da fatura: o valor explícito do CSV (coluna "fatura", AAAA-MM) sempre vence.
+        // Sem ele, calcula pelo dia de fechamento do cartão (billSource="auto") — o app avisa na revisão.
+        let billMonth = null, billYear = null, billSource = null;
+        if(pmObj.isCard && !invalid){
           const faturaRaw = String(get("fatura","Fatura")).trim();
           if(/^\d{4}-\d{2}$/.test(faturaRaw)){
             const [fy,fm] = faturaRaw.split("-");
-            billYear = parseInt(fy,10); billMonth = parseInt(fm,10)-1;
+            billYear = parseInt(fy,10); billMonth = parseInt(fm,10)-1; billSource = "csv";
           } else {
-            const b = billingMonth(date);
-            billMonth = b.month; billYear = b.year;
+            const b = billingFor(date, pmObj.id);
+            billMonth = b.month; billYear = b.year; billSource = "auto";
           }
         }
 
         return {
           _tmpId: "row_"+i+"_"+Date.now()+"_"+Math.random().toString(36).slice(2,7),
-          date, desc, norm, amount, kind,
+          date, desc, norm, amount, kind, invalid, isInstallment,
           pm: pmObj.id,
-          billMonth, billYear,
+          billMonth, billYear, billSource,
           cat: (rule && rule.kind==="gasto") ? rule.cat : "outros",
           person: rule ? (rule.person||"p1") : "p1",
           incType: (rule && rule.kind==="entrada") ? (rule.incType||"salario") : "salario",
           matched: !!rule
         };
       });
+  };
+
+  // Carrega as linhas na revisão e sugere a fatura mais comum do arquivo para o seletor de lote.
+  const loadRows = rows => {
+    setReviewRows(rows);
+    setExpTotals({});
+    const cnt={};
+    rows.forEach(r=>{ if(r.billMonth!=null&&r.billYear!=null){ const k=r.billYear+"-"+r.billMonth; cnt[k]=(cnt[k]||0)+1; } });
+    const top=Object.entries(cnt).sort((a,b)=>b[1]-a[1])[0];
+    if(top){ const [y,m]=top[0].split("-").map(Number); setBulkBill({month:m,year:y}); }
   };
 
   const handleFile = e => {
@@ -498,7 +620,7 @@ function App() {
         header:true, skipEmptyLines:true,
         complete: res => {
           if(!res.data || res.data.length===0){ setImportErr("Não encontrei linhas válidas no arquivo."); return; }
-          setReviewRows(buildRows(res.data));
+          loadRows(buildRows(res.data));
         },
         error: () => setImportErr("Não consegui ler esse CSV. Confira o formato.")
       });
@@ -510,7 +632,7 @@ function App() {
           const sheet = wb.Sheets[wb.SheetNames[0]];
           const json = XLSX.utils.sheet_to_json(sheet, {raw:false});
           if(!json || json.length===0){ setImportErr("Não encontrei linhas válidas na planilha."); return; }
-          setReviewRows(buildRows(json));
+          loadRows(buildRows(json));
         }catch(err){ setImportErr("Não consegui ler essa planilha. Confira o formato."); }
       };
       reader.readAsBinaryString(file);
@@ -522,64 +644,128 @@ function App() {
 
   const updateRow = (idx, patch) => setReviewRows(rows => rows.map((r,i)=> i===idx ? {...r,...patch} : r));
   const removeRow = idx => setReviewRows(rows => rows.filter((_,i)=>i!==idx));
-  const clearImport = () => { setReviewRows([]); setImportErr(""); };
+  const clearImport = () => { setReviewRows([]); setImportErr(""); setExpTotals({}); };
 
   const confirmImport = async () => {
-    if(reviewRows.length===0) return;
-    setSyncing(true);
+    const rows = reviewRows.filter((_,i)=>!(rowStatus[i]&&rowStatus[i].skip));
+    const skipped = reviewRows.length - rows.length;
+    if(rows.length===0){ setImportErr("Nada novo para importar: todas as linhas são duplicadas, pagamentos de fatura ou inválidas."); return; }
+    const mism = importSummary.filter(g=>{ const t=expTotals[g.key]; if(t===undefined||String(t).trim()==="") return false; return Math.abs(g.fileTotal-parseAmount(t))>=0.005; });
+    if(mism.length>0 && !window.confirm("O total de "+mism.map(g=>g.label).join("; ")+" não bate com o valor que você informou. Importar mesmo assim?")) return;
+    setSyncing(true); setImportErr("");
     try{
-      const batch = db.batch();
+      const batchId = "imp_"+Date.now().toString(36);
+      const ops = [];
       const rulesToSave = {};
-      reviewRows.forEach(row=>{
+      rows.forEach(row=>{
         const d = new Date(row.date+"T12:00:00");
         if(row.kind==="gasto"){
           const ref = db.collection("expenses").doc();
           const isCard = PMS.find(p=>p.id===row.pm)?.isCard||false;
           let billMonth = row.billMonth, billYear = row.billYear;
           if(isCard && (billMonth==null || billYear==null)){
-            const b = billingMonth(row.date); billMonth=b.month; billYear=b.year;
+            const b = billingFor(row.date, row.pm); billMonth=b.month; billYear=b.year;
           }
-          batch.set(ref, {
+          ops.push({ref, data:{
             date:row.date, month:d.getMonth(), year:d.getFullYear(),
             desc:row.desc, cat:row.cat, pm:row.pm, person:row.person,
             amount: parseFloat(row.amount.toFixed(2)),
             isCard, billMonth:isCard?billMonth:null, billYear:isCard?billYear:null,
-            createdAt:new Date().toISOString(), importedFrom:"import"
-          });
+            createdAt:new Date().toISOString(), importedFrom:"import", importBatchId:batchId
+          }});
         } else {
           const ref = db.collection("incomes").doc();
-          batch.set(ref, {
+          ops.push({ref, data:{
             date:row.date, month:d.getMonth(), year:d.getFullYear(),
             desc:row.desc, type:row.incType, person:row.person,
             amount: parseFloat(row.amount.toFixed(2)),
-            createdAt:new Date().toISOString(), importedFrom:"import"
-          });
+            createdAt:new Date().toISOString(), importedFrom:"import", importBatchId:batchId
+          }});
         }
         if(row.norm){
           rulesToSave[row.norm] = {norm:row.norm, kind:row.kind, cat:row.cat, person:row.person, incType:row.incType};
         }
       });
-      await batch.commit();
+      // O Firestore aceita no máximo 500 operações por batch: grava em blocos de 400.
+      for(let i=0;i<ops.length;i+=400){
+        const b = db.batch();
+        ops.slice(i,i+400).forEach(o=>b.set(o.ref,o.data));
+        await b.commit();
+      }
 
-      const ruleBatch = db.batch();
-      Object.values(rulesToSave).forEach(rule=>{
-        const docId = rule.norm.replace(/\s+/g,"_").slice(0,140) || "_vazio";
-        const ref = db.collection("categoryRules").doc(docId);
-        ruleBatch.set(ref, rule, {merge:true});
-      });
-      await ruleBatch.commit();
+      const ruleList = Object.values(rulesToSave);
+      for(let i=0;i<ruleList.length;i+=400){
+        const rb = db.batch();
+        ruleList.slice(i,i+400).forEach(rule=>{
+          const docId = rule.norm.replace(/\s+/g,"_").slice(0,140) || "_vazio";
+          rb.set(db.collection("categoryRules").doc(docId), rule, {merge:true});
+        });
+        await rb.commit();
+      }
 
-      const count = reviewRows.length;
       setReviewRows([]);
+      setExpTotals({});
       setSyncing(false);
-      flash(count+" lançamentos importados! ✓");
+      flash(rows.length+" lançamentos importados"+(skipped?" ("+skipped+" ignorados)":"")+"! ✓");
     }catch(err){
       setSyncing(false);
-      setImportErr("Erro ao salvar a importação. Tente novamente.");
+      setImportErr("Erro ao salvar a importação. Confira o que já entrou antes de tentar de novo — duplicados serão ignorados automaticamente.");
     }
   };
 
-  const importTotal = reviewRows.reduce((s,r)=> s + (r.kind==="gasto" ? -r.amount : r.amount), 0);
+  const undoImport = async b => {
+    setSyncing(true); setImportErr("");
+    try{
+      const refs=[...b.exp.map(id=>db.collection("expenses").doc(id)),...b.inc.map(id=>db.collection("incomes").doc(id))];
+      for(let i=0;i<refs.length;i+=400){
+        const bt=db.batch();
+        refs.slice(i,i+400).forEach(r=>bt.delete(r));
+        await bt.commit();
+      }
+      flash("Importação desfeita: "+refs.length+" lançamentos removidos ✓");
+    }catch(err){ setImportErr("Não consegui desfazer a importação. Tente novamente."); }
+    setUndoId(null); setSyncing(false);
+  };
+
+  const downloadBackup = () => {
+    const data={exportedAt:new Date().toISOString(),version:1,expenses,incomes,accounts,contribs,categoryRules:catRules};
+    const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download="prosperidade-backup-"+new Date().toISOString().slice(0,10)+".json";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+    const stamp=new Date().toISOString();
+    try{ localStorage.setItem("prosp_last_backup",stamp); }catch(e){}
+    setLastBackup(stamp);
+    flash("Backup baixado ✓");
+  };
+
+  const dueDaysLabel = [...new Set(PMS.filter(p=>p.isCard).map(p=>p.dueDay))].join(" e ");
+
+  const effRows = reviewRows.filter((_,i)=>!(rowStatus[i]&&rowStatus[i].skip));
+  const importTotal = effRows.reduce((s,r)=> s + (r.kind==="gasto" ? -r.amount : r.amount), 0);
+  const dupCount = rowStatus.filter(x=>x.dup&&!x.invalid).length;
+  const dupSkipped = rowStatus.filter(x=>x.dup&&x.skip&&!x.invalid).length;
+  const invalidCount = rowStatus.filter(x=>x.invalid).length;
+  const autoBillCount = reviewRows.filter((r,i)=>PMS.find(p=>p.id===r.pm)?.isCard && r.billSource!=="csv" && r.billSource!=="manual" && !(rowStatus[i]&&rowStatus[i].invalid)).length;
+  const paySkipped = rowStatus.filter(x=>x.payment&&x.skip&&!x.invalid).length;
+  const importSummary = (()=>{
+    const m={};
+    reviewRows.forEach((r,i)=>{
+      const st=rowStatus[i];
+      if(!st||st.invalid) return;
+      const pmo=PMS.find(p=>p.id===r.pm);
+      let k, label;
+      if(r.kind==="entrada"){ k="entrada"; label="↑ Entradas"; }
+      else if(pmo?.isCard){ k=r.pm+"|"+r.billYear+"|"+r.billMonth; label=pmo.e+" "+pmo.l+" · Fatura "+MONTHS[r.billMonth]+"/"+r.billYear; }
+      else { k="corrente"; label="🏦 Conta Corrente · gastos"; }
+      if(!m[k]) m[k]={key:k,label,fileCount:0,fileTotal:0,newCount:0,newTotal:0};
+      m[k].fileCount++; m[k].fileTotal+=r.amount;
+      if(!st.skip){ m[k].newCount++; m[k].newTotal+=r.amount; }
+    });
+    return Object.values(m);
+  })();
   const matchedCount = reviewRows.filter(r=>r.matched).length;
 
   if(loading) return (
@@ -599,7 +785,7 @@ function App() {
 
       <Toast msg={ok||invOk}/>
       {confirmDel&&<ConfirmDialog msg={confirmDel.msg} onConfirm={()=>{confirmDel.onConfirm();setConfirmDel(null);}} onCancel={()=>setConfirmDel(null)}/>}
-      {editExp&&<EditExpModal exp={editExp} onSave={async(f)=>{setEditExp(f);setSyncing(true);const d=new Date(f.date+'T12:00:00');const isCard=PMS.find(p=>p.id===f.pm)?.isCard||false;const bill=isCard?billingMonth(f.date):null;await db.collection('expenses').doc(f.id).update({date:f.date,month:d.getMonth(),year:d.getFullYear(),desc:f.desc,cat:f.cat,pm:f.pm,person:f.person,amount:parseFloat(parseFloat(f.amt).toFixed(2)),isCard,billMonth:isCard?bill.month:null,billYear:isCard?bill.year:null});setEditExp(null);setSyncing(false);flash('Gasto atualizado! ✓');}} onClose={()=>setEditExp(null)}/>}
+      {editExp&&<EditExpModal exp={editExp} onSave={async(f)=>{setEditExp(f);setSyncing(true);const d=new Date(f.date+'T12:00:00');const isCard=PMS.find(p=>p.id===f.pm)?.isCard||false;const origE=expenses.find(x=>x.id===f.id);const keepBill=isCard&&origE&&origE.isCard&&origE.billMonth!=null&&origE.billYear!=null&&origE.date===f.date;const bill=keepBill?{month:origE.billMonth,year:origE.billYear}:(isCard?billingFor(f.date,f.pm):null);await db.collection('expenses').doc(f.id).update({date:f.date,month:d.getMonth(),year:d.getFullYear(),desc:f.desc,cat:f.cat,pm:f.pm,person:f.person,amount:parseFloat(parseFloat(f.amt).toFixed(2)),isCard,billMonth:isCard?bill.month:null,billYear:isCard?bill.year:null});setEditExp(null);setSyncing(false);flash('Gasto atualizado! ✓');}} onClose={()=>setEditExp(null)}/>}
       {editInc&&<EditIncModal inc={editInc} onSave={async(f)=>{setSyncing(true);const d=new Date(f.date+'T12:00:00');await db.collection('incomes').doc(f.id).update({date:f.date,month:d.getMonth(),year:d.getFullYear(),desc:f.desc,type:f.type,person:f.person,amount:parseFloat(parseFloat(f.amt).toFixed(2))});setEditInc(null);setSyncing(false);flash('Entrada atualizada! ✓');}} onClose={()=>setEditInc(null)}/>}
 
       {/* ── HEADER ── */}
@@ -629,8 +815,15 @@ function App() {
           ))}
         </div>
 
+        {/* Ano */}
+        <div style={{display:"flex",alignItems:"center",gap:12,marginTop:12}}>
+          <button onClick={()=>setYear(y=>y-1)} style={{background:"transparent",border:"1px solid #E8E8E8",borderRadius:20,width:30,height:26,fontSize:14,cursor:"pointer",color:"#8E8E9A"}}>‹</button>
+          <span style={{fontSize:13,fontWeight:800,color:"#1a1a2e",minWidth:40,textAlign:"center"}}>{year}</span>
+          <button onClick={()=>setYear(y=>y+1)} style={{background:"transparent",border:"1px solid #E8E8E8",borderRadius:20,width:30,height:26,fontSize:14,cursor:"pointer",color:"#8E8E9A"}}>›</button>
+        </div>
+
         {/* Month scroll */}
-        <div style={{display:"flex",gap:4,marginTop:12,overflowX:"auto",paddingBottom:2}}>
+        <div style={{display:"flex",gap:4,marginTop:8,overflowX:"auto",paddingBottom:2}}>
           {MONTHS.map((m,i)=>(
             <button key={i} onClick={()=>setMonth(i)} style={{background:month===i?"#1a1a2e":"transparent",color:month===i?"#fff":"#8E8E9A",border:month===i?"none":"1px solid #E8E8E8",borderRadius:20,padding:"5px 13px",fontSize:12,cursor:"pointer",whiteSpace:"nowrap",fontWeight:month===i?700:500,transition:"all 0.15s"}}>{m}</button>
           ))}
@@ -648,6 +841,8 @@ function App() {
       </div>
 
       <div style={{padding:"16px 14px"}}>
+
+        {loadErr&&<div style={{background:"#FFF0EF",color:"#E8544A",borderRadius:12,padding:"10px 14px",marginBottom:12,fontSize:12,fontWeight:600}}>{loadErr}</div>}
 
         {/* ══ ADD ══ */}
         {tab==="add"&&(
@@ -704,13 +899,13 @@ function App() {
                     ))}
                   </div>
                   {ef.pm!=="corrente"&&ef.date&&(()=>{
-                    const bill=billingMonth(ef.date);
+                    const bill=billingFor(ef.date,ef.pm);
                     const pm=PMS.find(p=>p.id===ef.pm);
                     return (
                       <div style={{marginTop:12,background:"#F5F0FF",borderRadius:12,padding:"11px 14px",border:"1px solid #E0D5FF"}}>
                         <div style={{fontSize:12,color:"#6C5CE7",fontWeight:700,marginBottom:4}}>💳 {pm.l}</div>
                         <div style={{fontSize:12,color:"#6C5CE7",lineHeight:1.7}}>
-                          Compra em {MONTHS[new Date(ef.date+"T12:00:00").getMonth()]} → Fatura fecha dia 31 → <strong>Débito no saldo de {MONTHS[bill.month]}</strong>
+                          Compra em {MONTHS[new Date(ef.date+"T12:00:00").getMonth()]} → Fatura fecha dia {closeDayOf(ef.pm)} → <strong>Débito no saldo de {MONTHS[bill.month]}</strong>
                         </div>
                       </div>
                     );
@@ -767,7 +962,7 @@ function App() {
             <div style={{background:"#fff",borderRadius:16,padding:16,marginBottom:14,boxShadow:shadow,border:"1px solid #EBEBEB"}}>
               <div style={{fontSize:11,color:"#8E8E9A",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:8}}>Importar lançamentos</div>
               <div style={{fontSize:12,color:"#8E8E9A",lineHeight:1.6,marginBottom:14}}>
-                Envie um arquivo <strong>.csv</strong> ou <strong>.xlsx</strong> com as colunas: <strong>data</strong> (AAAA-MM-DD), <strong>descricao</strong>, <strong>valor</strong>, <strong>tipo</strong> (gasto/entrada) e <strong>origem</strong> (corrente, card1, card2 ou card3). Para gastos de cartão, você pode incluir também a coluna opcional <strong>fatura</strong> (AAAA-MM) informando o mês exato da fatura — evita erro de arredondamento quando a compra é no fim do mês. Se não vier preenchida, o app calcula automaticamente (mês seguinte à compra).
+                Envie um arquivo <strong>.csv</strong> ou <strong>.xlsx</strong> com as colunas: <strong>data</strong> (AAAA-MM-DD), <strong>descricao</strong>, <strong>valor</strong>, <strong>tipo</strong> (gasto/entrada) e <strong>origem</strong> (corrente, card1, card2 ou card3). Para gastos de cartão, você pode incluir também a coluna opcional <strong>fatura</strong> (AAAA-MM) informando o mês exato da fatura — evita erro de arredondamento quando a compra é no fim do mês. Se não vier preenchida, o app estima pelo dia de fechamento do cartão e avisa na revisão.
               </div>
               <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls" onChange={handleFile} style={{display:"none"}}/>
               <button onClick={()=>fileInputRef.current&&fileInputRef.current.click()} style={{background:"#6C5CE7",border:"none",borderRadius:14,padding:"14px",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer",width:"100%",boxShadow:"0 4px 14px rgba(108,92,231,0.3)"}}>📁 Escolher arquivo</button>
@@ -778,14 +973,56 @@ function App() {
               <>
                 <div style={{background:"#F5F0FF",borderRadius:14,padding:"12px 16px",marginBottom:12,border:"1px solid #E0D5FF",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <div>
-                    <div style={{fontSize:13,fontWeight:700,color:"#6C5CE7"}}>{reviewRows.length} lançamentos encontrados</div>
-                    <div style={{fontSize:11,color:"#6C5CE7",marginTop:2}}>{matchedCount} já com categoria aprendida</div>
+                    <div style={{fontSize:13,fontWeight:700,color:"#6C5CE7"}}>{effRows.length} a importar · {reviewRows.length} no arquivo</div>
+                    <div style={{fontSize:11,color:"#6C5CE7",marginTop:2}}>{matchedCount} já com categoria aprendida{dupSkipped>0?" · "+dupSkipped+" duplicados ignorados":""}{invalidCount>0?" · "+invalidCount+" inválidos":""}{paySkipped>0?" · "+paySkipped+" pagamentos de fatura ignorados":""}</div>
                   </div>
                   <div style={{fontSize:16,fontWeight:800,color:importTotal>=0?"#00A86B":"#E8544A"}}>{fmt(importTotal)}</div>
                 </div>
 
+                {importSummary.length>0&&(
+                  <div style={{background:"#fff",borderRadius:14,padding:"12px 14px",marginBottom:10,boxShadow:shadow,border:"1px solid #EBEBEB"}}>
+                    <div style={{fontSize:10,color:"#8E8E9A",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:6}}>Conferência — digite o total da fatura/extrato</div>
+                    {importSummary.map(g=>{
+                      const raw=expTotals[g.key];
+                      const has=raw!==undefined&&String(raw).trim()!=="";
+                      const diff=has?g.fileTotal-parseAmount(raw):0;
+                      const okTot=has&&Math.abs(diff)<0.005;
+                      return (
+                        <div key={g.key} style={{padding:"8px 0",borderTop:"1px solid #F3F3F3"}}>
+                          <div style={{display:"flex",justifyContent:"space-between",fontSize:13}}>
+                            <span style={{color:"#4a4a6a",fontWeight:600}}>{g.label} <span style={{color:"#8E8E9A",fontWeight:500}}>({g.fileCount})</span></span>
+                            <span style={{fontWeight:800,color:"#1a1a2e"}}>{fmt(g.fileTotal)}</span>
+                          </div>
+                          {g.newCount!==g.fileCount&&<div style={{fontSize:11,color:"#8E8E9A",marginTop:2}}>A importar: {g.newCount} · {fmt(g.newTotal)} (o restante já existe ou será ignorado)</div>}
+                          <div style={{display:"flex",alignItems:"center",gap:8,marginTop:6}}>
+                            <input inputMode="decimal" placeholder="Total esperado (opcional)" value={raw??""} onChange={e=>setExpTotals(t=>({...t,[g.key]:e.target.value}))} style={{...SS,flex:1,minWidth:0}}/>
+                            {has&&<span style={{fontSize:12,fontWeight:700,color:okTot?"#00A86B":"#E8544A",whiteSpace:"nowrap"}}>{okTot?"✓ confere":"Δ "+fmt(diff)}</span>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {autoBillCount>0&&(
+                  <div style={{background:"#FFF8E6",borderRadius:14,padding:"12px 14px",marginBottom:10,border:"1px solid #F5E1A4"}}>
+                    <div style={{fontSize:12,fontWeight:700,color:"#B7791F",marginBottom:4}}>⚠ {autoBillCount} linha(s) de cartão sem a coluna "fatura"</div>
+                    <div style={{fontSize:11,color:"#B7791F",lineHeight:1.6,marginBottom:8}}>O mês da fatura foi estimado pelo dia de fechamento. Como um arquivo costuma ser uma única fatura, escolha o mês correto e aplique a todas:</div>
+                    <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+                      <select value={bulkBill.month} onChange={e=>setBulkBill(b=>({...b,month:parseInt(e.target.value,10)}))} style={SS}>
+                        {MONTHS.map((m,i)=><option key={i} value={i}>Fatura {m}</option>)}
+                      </select>
+                      <input type="number" value={bulkBill.year} onChange={e=>setBulkBill(b=>({...b,year:parseInt(e.target.value,10)||b.year}))} style={{...SS,width:72}}/>
+                      <button onClick={()=>setReviewRows(rows=>rows.map(r=>{
+                        const isC=PMS.find(p=>p.id===r.pm)?.isCard;
+                        return (isC && r.billSource!=="csv" && r.billSource!=="manual" && !r.invalid) ? {...r,billMonth:bulkBill.month,billYear:bulkBill.year,billSource:"lote"} : r;
+                      }))} style={{background:"#B7791F",border:"none",borderRadius:10,padding:"9px 14px",color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer"}}>Aplicar</button>
+                    </div>
+                  </div>
+                )}
+
                 {reviewRows.map((row,idx)=>(
-                  <div key={row._tmpId} style={{background:"#fff",borderRadius:14,padding:"12px 14px",marginBottom:8,boxShadow:shadow,border:"1px solid #EBEBEB"}}>
+                  <div key={row._tmpId} style={{background:"#fff",borderRadius:14,padding:"12px 14px",marginBottom:8,boxShadow:shadow,border:"1px solid "+(rowStatus[idx]&&rowStatus[idx].skip?"#F5C6C2":"#EBEBEB"),opacity:rowStatus[idx]&&rowStatus[idx].skip?0.55:1}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8,gap:8}}>
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{fontSize:13,fontWeight:700,color:"#1a1a2e",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{row.desc||"(sem descrição)"}</div>
@@ -793,7 +1030,22 @@ function App() {
                       </div>
                       <div style={{fontSize:14,fontWeight:800,color:row.kind==="gasto"?"#E8544A":"#00A86B",flexShrink:0}}>{row.kind==="gasto"?"-":"+"}{fmt(row.amount)}</div>
                     </div>
-                    {row.matched&&<div style={{fontSize:10,color:"#6C5CE7",background:"#F5F0FF",display:"inline-block",padding:"2px 8px",borderRadius:20,marginBottom:8,fontWeight:600}}>✓ categoria aprendida</div>}
+                    {row.matched&&<div style={{fontSize:10,color:"#6C5CE7",background:"#F5F0FF",display:"inline-block",padding:"2px 8px",borderRadius:20,marginBottom:8,marginRight:6,fontWeight:600}}>✓ categoria aprendida</div>}
+                    {rowStatus[idx]&&rowStatus[idx].invalid&&<div style={{fontSize:10,color:"#E8544A",background:"#FFF0EF",display:"inline-block",padding:"2px 8px",borderRadius:20,marginBottom:8,marginRight:6,fontWeight:700}}>✕ data ou valor inválido — será ignorada</div>}
+                    {rowStatus[idx]&&rowStatus[idx].dup&&!rowStatus[idx].invalid&&(
+                      <div style={{display:"inline-flex",alignItems:"center",gap:6,marginBottom:8,marginRight:6}}>
+                        <span style={{fontSize:10,color:"#E8544A",background:"#FFF0EF",padding:"2px 8px",borderRadius:20,fontWeight:700}}>⚠ já importado</span>
+                        <button onClick={()=>updateRow(idx,{forceInclude:!row.forceInclude})} style={{fontSize:10,background:"transparent",border:"1px solid #E8E8E8",borderRadius:20,padding:"2px 8px",color:"#8E8E9A",cursor:"pointer",fontWeight:600}}>{row.forceInclude?"Ignorar":"Importar mesmo assim"}</button>
+                      </div>
+                    )}
+                    {rowStatus[idx]&&rowStatus[idx].payment&&!rowStatus[idx].invalid&&(
+                      <div style={{display:"inline-flex",alignItems:"center",gap:6,marginBottom:8,marginRight:6}}>
+                        <span style={{fontSize:10,color:"#6C5CE7",background:"#F5F0FF",padding:"2px 8px",borderRadius:20,fontWeight:700}}>💳 pagamento de fatura — ignorado (evita contar em dobro)</span>
+                        <button onClick={()=>updateRow(idx,{forceInclude:!row.forceInclude})} style={{fontSize:10,background:"transparent",border:"1px solid #E8E8E8",borderRadius:20,padding:"2px 8px",color:"#8E8E9A",cursor:"pointer",fontWeight:600}}>{row.forceInclude?"Ignorar":"Importar mesmo assim"}</button>
+                      </div>
+                    )}
+                    {PMS.find(p=>p.id===row.pm)?.isCard&&row.billSource==="auto"&&<div style={{fontSize:10,color:"#B7791F",background:"#FFF8E6",display:"inline-block",padding:"2px 8px",borderRadius:20,marginBottom:8,marginRight:6,fontWeight:600}}>{row.isInstallment?"parcela — confira a fatura":"fatura estimada"}</div>}
+                    {PMS.find(p=>p.id===row.pm)?.isCard&&row.billSource==="lote"&&<div style={{fontSize:10,color:"#6C5CE7",background:"#F5F0FF",display:"inline-block",padding:"2px 8px",borderRadius:20,marginBottom:8,marginRight:6,fontWeight:600}}>fatura do lote</div>}
                     <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
                       <select value={row.kind} onChange={e=>updateRow(idx,{kind:e.target.value})} style={SS}>
                         <option value="gasto">↓ Gasto</option>
@@ -815,8 +1067,8 @@ function App() {
                         const isCard = PMS.find(p=>p.id===newPm)?.isCard||false;
                         const patch = {pm:newPm};
                         if(isCard && (row.billMonth==null||row.billYear==null)){
-                          const b = billingMonth(row.date);
-                          patch.billMonth = b.month; patch.billYear = b.year;
+                          const b = billingFor(row.date, newPm);
+                          patch.billMonth = b.month; patch.billYear = b.year; patch.billSource = "auto";
                         }
                         updateRow(idx,patch);
                       }} style={SS}>
@@ -824,10 +1076,10 @@ function App() {
                       </select>
                       {PMS.find(p=>p.id===row.pm)?.isCard && (
                         <>
-                          <select value={row.billMonth ?? ""} onChange={e=>updateRow(idx,{billMonth:parseInt(e.target.value,10)})} style={SS} title="Mês da fatura">
+                          <select value={row.billMonth ?? ""} onChange={e=>updateRow(idx,{billMonth:parseInt(e.target.value,10),billSource:"manual"})} style={SS} title="Mês da fatura">
                             {MONTHS.map((m,i)=><option key={i} value={i}>Fatura {m}</option>)}
                           </select>
-                          <input type="number" value={row.billYear ?? ""} onChange={e=>updateRow(idx,{billYear:parseInt(e.target.value,10)})} style={{...SS,width:72}} title="Ano da fatura"/>
+                          <input type="number" value={row.billYear ?? ""} onChange={e=>updateRow(idx,{billYear:parseInt(e.target.value,10),billSource:"manual"})} style={{...SS,width:72}} title="Ano da fatura"/>
                         </>
                       )}
                       <button onClick={()=>removeRow(idx)} style={{background:"transparent",border:"none",color:"#D1D1D1",fontSize:16,cursor:"pointer",marginLeft:"auto"}}>🗑️</button>
@@ -841,6 +1093,47 @@ function App() {
                 </div>
               </>
             )}
+
+            <div style={{background:"#fff",borderRadius:16,padding:16,marginTop:14,boxShadow:shadow,border:"1px solid #EBEBEB"}}>
+              <div style={{fontSize:11,color:"#8E8E9A",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:10}}>Importações recentes</div>
+              {importBatches.length===0&&<div style={{fontSize:12,color:"#8E8E9A"}}>Nenhuma importação encontrada.</div>}
+              {importBatches.map(b=>{
+                const when=b.createdAt?new Date(b.createdAt).toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):"data desconhecida";
+                const pmsL=Object.keys(b.pms).map(id=>PMS.find(p=>p.id===id)?.l||id).join(", ");
+                const fats=Object.keys(b.faturas).join(", ");
+                return (
+                  <div key={b.id} style={{padding:"10px 0",borderTop:"1px solid #F3F3F3"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                      <div style={{minWidth:0}}>
+                        <div style={{fontSize:13,fontWeight:700,color:"#1a1a2e"}}>{when}{b.legacy?" · importação antiga":""}</div>
+                        <div style={{fontSize:11,color:"#8E8E9A",marginTop:2,lineHeight:1.5}}>
+                          {b.exp.length>0&&<span>{b.exp.length} gastos · {fmt(b.gTotal)}{pmsL?" · "+pmsL:""}{fats?" · fatura "+fats:""}</span>}
+                          {b.exp.length>0&&b.inc.length>0&&<br/>}
+                          {b.inc.length>0&&<span>{b.inc.length} entradas · {fmt(b.iTotal)}</span>}
+                        </div>
+                      </div>
+                      {undoId===b.id
+                        ? <div style={{display:"flex",gap:6,flexShrink:0}}>
+                            <button onClick={()=>setUndoId(null)} style={{background:"#F5F5F3",border:"none",borderRadius:10,padding:"7px 10px",fontSize:12,fontWeight:700,color:"#1a1a2e",cursor:"pointer"}}>Não</button>
+                            <button disabled={syncing} onClick={()=>undoImport(b)} style={{background:"#E8544A",border:"none",borderRadius:10,padding:"7px 10px",fontSize:12,fontWeight:700,color:"#fff",cursor:"pointer",opacity:syncing?0.6:1}}>Apagar {b.exp.length+b.inc.length}</button>
+                          </div>
+                        : <button onClick={()=>setUndoId(b.id)} style={{background:"transparent",border:"1px solid #F5C6C2",borderRadius:10,padding:"7px 10px",fontSize:12,fontWeight:700,color:"#E8544A",cursor:"pointer",flexShrink:0}}>Desfazer</button>}
+                    </div>
+                  </div>
+                );
+              })}
+              <div style={{fontSize:10,color:"#B0B0C0",marginTop:8,lineHeight:1.5}}>Desfazer apaga todos os lançamentos daquela importação. As categorias aprendidas são mantidas.</div>
+            </div>
+
+            <div style={{background:"#fff",borderRadius:16,padding:16,marginTop:14,boxShadow:shadow,border:"1px solid #EBEBEB"}}>
+              <div style={{fontSize:11,color:"#8E8E9A",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:10}}>Backup e conta</div>
+              <button onClick={downloadBackup} style={{background:"#1a1a2e",border:"none",borderRadius:14,padding:"13px",color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer",width:"100%"}}>⬇ Baixar backup (JSON)</button>
+              <div style={{fontSize:11,color:"#8E8E9A",marginTop:6}}>{lastBackup?"Último backup: "+new Date(lastBackup).toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}):"Nenhum backup baixado neste aparelho ainda."}</div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:14,paddingTop:12,borderTop:"1px solid #F3F3F3"}}>
+                <span style={{fontSize:12,color:"#8E8E9A",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginRight:8}}>{user&&user.email}</span>
+                <button onClick={onLogout} style={{background:"transparent",border:"1px solid #E8E8E8",borderRadius:10,padding:"7px 14px",fontSize:12,fontWeight:700,color:"#4a4a6a",cursor:"pointer",flexShrink:0}}>Sair</button>
+              </div>
+            </div>
           </div>
         )}
 
@@ -868,8 +1161,8 @@ function App() {
                     <div style={{fontSize:22,fontWeight:800,color:"#6C5CE7",marginTop:3}}>{fmt(totPending)}</div>
                   </div>
                   <div style={{fontSize:11,color:"#8E8E9A",textAlign:"right",lineHeight:1.6}}>
-                    <div>Compras deste mês</div>
-                    <div>Débito dia 10/{MONTHS[month===11?0:month+1]}</div>
+                    <div>Faturas em aberto</div>
+                    <div>Vence dia {dueDaysLabel}/{MONTHS[nextM]}</div>
                   </div>
                 </div>
                 {PMS.filter(p=>p.isCard).map(p=>{
@@ -877,7 +1170,7 @@ function App() {
                   if(!tot) return null;
                   return (
                     <div key={p.id} style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderTop:"1px solid #F0EBFF",fontSize:13}}>
-                      <span style={{color:"#8E8E9A",fontWeight:500}}>{p.l}</span>
+                      <span style={{color:"#8E8E9A",fontWeight:500}}>{p.l} <span style={{fontSize:11}}>· vence dia {p.dueDay}</span></span>
                       <span style={{color:"#6C5CE7",fontWeight:700}}>{fmt(tot)}</span>
                     </div>
                   );
@@ -933,7 +1226,7 @@ function App() {
               <div style={{background:"#fff",borderRadius:14,padding:"13px 14px",boxShadow:shadow,border:"1px solid #EBEBEB"}}>
                 <div style={{fontSize:10,color:"#6C5CE7",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:5}}>Faturas</div>
                 <div style={{fontSize:17,fontWeight:800,color:"#1a1a2e"}}>{fmt(debitExp.filter(e=>e.isCard).reduce((s,e)=>s+e.amount,0))}</div>
-                <div style={{fontSize:11,color:"#8E8E9A",marginTop:3}}>Cartões do mês ant.</div>
+                <div style={{fontSize:11,color:"#8E8E9A",marginTop:3}}>Faturas debitadas no mês</div>
               </div>
             </div>
 
@@ -967,7 +1260,7 @@ function App() {
             {mode==="expense"&&(
               <>
                 <div style={{background:"#F5F0FF",borderRadius:12,padding:"9px 14px",marginBottom:12,fontSize:12,color:"#6C5CE7",fontWeight:500}}>
-                  Gastos lançados em {MONTHS[month]} — cartões debitam em {MONTHS[month===11?0:month+1]}
+                  {fPmIsCard ? `Fatura de ${MONTHS[month]} — compras que debitam em ${MONTHS[month]}` : `Gastos lançados em ${MONTHS[month]} — cartões debitam em ${MONTHS[month===11?0:month+1]}`}
                 </div>
                 <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>
                   <select value={fPer} onChange={e=>setFPer(e.target.value)} style={SS}><option value="all">Todos</option>{PERSONS.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>
@@ -1200,6 +1493,82 @@ function App() {
       </div>
     </div>
   );
+}
+
+function LoadingScreen({text}) {
+  return (
+    <div style={{minHeight:"100vh",background:"#F5F5F3",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14}}>
+      <div style={{fontSize:52}}>💰</div>
+      <div style={{fontSize:24,fontWeight:800,color:"#1a1a2e",letterSpacing:-0.5}}>Prosperidade</div>
+      <div style={{width:32,height:32,border:"3px solid #E8E8E8",borderTop:"3px solid #6C5CE7",borderRadius:"50%",animation:"spin 0.8s linear infinite",marginTop:8}}/>
+      <div style={{color:"#8E8E9A",fontSize:13}}>{text}</div>
+    </div>
+  );
+}
+
+function LoginScreen({onLogin, onReset, error, info, busy}) {
+  const [email,setEmail]=useState("");
+  const [pw,setPw]=useState("");
+  return (
+    <div style={{minHeight:"100vh",background:"#F5F5F3",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{width:"100%",maxWidth:360,background:"#fff",borderRadius:20,padding:24,boxShadow:shadowMd,border:"1px solid #EBEBEB"}}>
+        <div style={{textAlign:"center",marginBottom:18}}>
+          <div style={{fontSize:44}}>💰</div>
+          <div style={{fontSize:22,fontWeight:800,color:"#1a1a2e",letterSpacing:-0.5}}>Prosperidade</div>
+          <div style={{fontSize:12,color:"#8E8E9A",marginTop:4}}>Entre para ver as finanças da família</div>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          <input type="email" autoComplete="username" placeholder="E-mail" value={email} onChange={e=>setEmail(e.target.value)} style={IS}/>
+          <input type="password" autoComplete="current-password" placeholder="Senha" value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") onLogin(email,pw); }} style={IS}/>
+          {error&&<div style={{background:"#FFF0EF",color:"#E8544A",borderRadius:10,padding:"9px 12px",fontSize:12,fontWeight:600}}>{error}</div>}
+          {info&&<div style={{background:"#E8F8F0",color:"#00A86B",borderRadius:10,padding:"9px 12px",fontSize:12,fontWeight:600}}>{info}</div>}
+          <button onClick={()=>onLogin(email,pw)} disabled={busy||!email||!pw} style={{background:"#6C5CE7",border:"none",borderRadius:14,padding:"14px",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer",opacity:(busy||!email||!pw)?0.6:1}}>{busy?"Entrando...":"Entrar"}</button>
+          <button onClick={()=>onReset(email)} style={{background:"transparent",border:"none",color:"#6C5CE7",fontSize:12,cursor:"pointer",fontWeight:600}}>Esqueci a senha</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [user,setUser]=useState(undefined); // undefined = verificando, null = deslogado
+  const [authErr,setAuthErr]=useState("");
+  const [authInfo,setAuthInfo]=useState("");
+  const [busy,setBusy]=useState(false);
+
+  useEffect(()=>auth.onAuthStateChanged(u=>{
+    if(u && ALLOWED_EMAILS.length>0 && !ALLOWED_EMAILS.map(x=>x.toLowerCase()).includes((u.email||"").toLowerCase())){
+      setAuthErr("Este e-mail não tem acesso ao app.");
+      auth.signOut();
+      setUser(null);
+      return;
+    }
+    setUser(u||null);
+  }),[]);
+
+  const authMsg = e => {
+    const c = e && e.code;
+    if(c==="auth/invalid-credential"||c==="auth/wrong-password"||c==="auth/user-not-found"||c==="auth/invalid-email") return "E-mail ou senha incorretos.";
+    if(c==="auth/too-many-requests") return "Muitas tentativas. Aguarde alguns minutos e tente de novo.";
+    if(c==="auth/network-request-failed") return "Sem conexão. Verifique sua internet.";
+    return "Não consegui entrar ("+(c||"erro desconhecido")+").";
+  };
+  const login = async (email,pw) => {
+    setBusy(true); setAuthErr(""); setAuthInfo("");
+    try{ await auth.signInWithEmailAndPassword(email.trim(),pw); }
+    catch(e){ setAuthErr(authMsg(e)); }
+    setBusy(false);
+  };
+  const reset = async email => {
+    setAuthErr(""); setAuthInfo("");
+    if(!email.trim()){ setAuthErr("Digite seu e-mail primeiro."); return; }
+    try{ await auth.sendPasswordResetEmail(email.trim()); setAuthInfo("Se esse e-mail tem conta, enviei um link para redefinir a senha."); }
+    catch(e){ setAuthErr(authMsg(e)); }
+  };
+
+  if(user===undefined) return <LoadingScreen text="Verificando acesso..."/>;
+  if(!user) return <LoginScreen onLogin={login} onReset={reset} error={authErr} info={authInfo} busy={busy}/>;
+  return <MainApp user={user} onLogout={()=>auth.signOut()}/>;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
