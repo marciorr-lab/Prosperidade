@@ -136,36 +136,36 @@ function normalizeDesc(s) {
 }
 
 const CATS = [
-  {id:"mercado",     e:"🛒", l:"Mercado",     c:"#00A86B"},
-  {id:"alimentacao", e:"🍽️", l:"Alimentação", c:"#FF6B35"},
-  {id:"educacao",    e:"📚", l:"Educação",     c:"#3B82F6"},
-  {id:"saude",       e:"🏥", l:"Saúde",        c:"#E0328C"},
-  {id:"transporte",  e:"🚗", l:"Transporte",   c:"#5233E8"},
-  {id:"lazer",       e:"🎉", l:"Lazer",        c:"#F59E0B"},
-  {id:"compras",     e:"🛍️", l:"Compras",      c:"#10B981"},
-  {id:"casa",        e:"🏠", l:"Casa",         c:"#E8544A"},
-  {id:"assinaturas", e:"📱", l:"Assinaturas",  c:"#0EA5E9"},
-  {id:"outros",      e:"📦", l:"Outros",       c:"#94A3B8"},
+  {id:"mercado",     e:"cart", l:"Mercado",     c:"#00A86B"},
+  {id:"alimentacao", e:"food", l:"Alimentação", c:"#FF6B35"},
+  {id:"educacao",    e:"book", l:"Educação",     c:"#3B82F6"},
+  {id:"saude",       e:"heart", l:"Saúde",        c:"#E0328C"},
+  {id:"transporte",  e:"car", l:"Transporte",   c:"#5233E8"},
+  {id:"lazer",       e:"smile", l:"Lazer",        c:"#F59E0B"},
+  {id:"compras",     e:"bag", l:"Compras",      c:"#10B981"},
+  {id:"casa",        e:"home", l:"Casa",         c:"#E8544A"},
+  {id:"assinaturas", e:"phone", l:"Assinaturas",  c:"#0EA5E9"},
+  {id:"outros",      e:"box", l:"Outros",       c:"#94A3B8"},
 ];
 
 const ITYPES = [
-  {id:"salario",   e:"💼", l:"Salário",   c:"#00A86B"},
-  {id:"freelance", e:"🛠️", l:"Freelance", c:"#3B82F6"},
-  {id:"reembolso", e:"↩️", l:"Reembolso", c:"#F59E0B"},
-  {id:"bonus",     e:"🏆", l:"Bônus",     c:"#FF6B35"},
-  {id:"aluguel",   e:"🏘️", l:"Aluguel",   c:"#5233E8"},
-  {id:"dividendo", e:"📈", l:"Dividendo", c:"#10B981"},
-  {id:"presente",  e:"🎁", l:"Presente",  c:"#E0328C"},
-  {id:"outro",     e:"📦", l:"Outro",     c:"#94A3B8"},
+  {id:"salario",   e:"briefcase", l:"Salário",   c:"#00A86B"},
+  {id:"freelance", e:"laptop", l:"Freelance", c:"#3B82F6"},
+  {id:"reembolso", e:"undo", l:"Reembolso", c:"#F59E0B"},
+  {id:"bonus",     e:"star", l:"Bônus",     c:"#FF6B35"},
+  {id:"aluguel",   e:"building", l:"Aluguel",   c:"#5233E8"},
+  {id:"dividendo", e:"up", l:"Dividendo", c:"#10B981"},
+  {id:"presente",  e:"gift", l:"Presente",  c:"#E0328C"},
+  {id:"outro",     e:"box", l:"Outro",     c:"#94A3B8"},
 ];
 
 // closeDay = dia de fechamento da fatura de cada cartão; dueDay = dia de vencimento (ajuste conforme o seu cartão).
 // Compra até esse dia entra na fatura que debita no mês seguinte; depois, na do mês subsequente.
 const PMS = [
-  {id:"corrente", e:"🏦", l:"Conta Corrente", isCard:false},
-  {id:"card1",    e:"💳", l:"Cartão Casa",    isCard:true, closeDay:29, dueDay:10},
-  {id:"card2",    e:"💳", l:"Cartão Marcio",  isCard:true, closeDay:29, dueDay:10},
-  {id:"card3",    e:"💳", l:"Cartão Ju",      isCard:true, closeDay:29, dueDay:10},
+  {id:"corrente", e:"bank", l:"Conta Corrente", isCard:false},
+  {id:"card1",    e:"card", l:"Cartão Casa",    isCard:true, closeDay:29, dueDay:10},
+  {id:"card2",    e:"card", l:"Cartão Marcio",  isCard:true, closeDay:29, dueDay:10},
+  {id:"card3",    e:"card", l:"Cartão Ju",      isCard:true, closeDay:29, dueDay:10},
 ];
 
 const PERSONS = [
@@ -221,7 +221,7 @@ function ConfirmDialog({msg, onConfirm, onCancel}) {
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:"0 24px"}}>
       <div style={{background:"#fff",borderRadius:20,padding:"24px 20px",width:"100%",maxWidth:360,boxShadow:"0 20px 60px rgba(0,0,0,0.2)",animation:"fadeIn 0.2s ease"}}>
-        <div style={{fontSize:36,textAlign:"center",marginBottom:12}}>🗑️</div>
+        <div style={{display:"flex",justifyContent:"center",marginBottom:12,color:"#D92D6F"}}><Ico k="trash" size={36}/></div>
         <div style={{fontSize:15,fontWeight:700,color:"#17133A",textAlign:"center",marginBottom:6}}>Excluir lançamento?</div>
         <div style={{fontSize:13,color:"#5A5680",textAlign:"center",marginBottom:20,lineHeight:1.5}}>{msg}</div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
@@ -243,8 +243,8 @@ function EditExpModal({exp, onSave, onClose}) {
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={onClose}>
       <div style={{background:"#F3F1FF",borderRadius:"20px 20px 0 0",width:"100%",maxWidth:430,maxHeight:"90vh",overflowY:"auto",padding:"20px 14px calc(40px + env(safe-area-inset-bottom))",animation:"slideDown 0.25s ease"}} onClick={e=>e.stopPropagation()}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
-          <div style={{fontSize:16,fontWeight:800,color:"#17133A"}}>✏️ Editar Gasto</div>
-          <button onClick={onClose} style={{background:"#EBEBEB",border:"none",borderRadius:22,width:44,height:44,fontSize:16,cursor:"pointer",color:"#5A5680"}}>✕</button>
+          <div style={{fontSize:16,fontWeight:800,color:"#17133A"}}><IcoLabel k="edit" size={18}>Editar Gasto</IcoLabel></div>
+          <button onClick={onClose} style={{background:"#EBEBEB",border:"none",borderRadius:22,width:44,height:44,fontSize:16,cursor:"pointer",color:"#5A5680",display:"flex",alignItems:"center",justifyContent:"center"}}><Ico k="x" size={18}/></button>
         </div>
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
           <div style={{background:"#fff",borderRadius:22,padding:16,boxShadow:"0 1px 4px rgba(0,0,0,0.06)",border:"1px solid #ECE9FF",display:"flex",flexDirection:"column",gap:12}}>
@@ -270,7 +270,7 @@ function EditExpModal({exp, onSave, onClose}) {
             <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:7}}>
               {CATS.map(c=>(
                 <button key={c.id} onClick={()=>setF(v=>({...v,cat:c.id}))} style={{background:f.cat===c.id?c.c+"18":"#F9F9F9",border:"1.5px solid "+(f.cat===c.id?c.c:"#EBEBEB"),borderRadius:12,padding:"9px 4px",fontSize:20,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
-                  <span>{c.e}</span>
+                  <Ico k={c.e} size={22} color={f.cat===c.id?c.c:"#5A5680"}/>
                   <span style={{fontSize:8,color:f.cat===c.id?c.c:"#5A5680",fontWeight:f.cat===c.id?700:400,textAlign:"center"}}>{c.l}</span>
                 </button>
               ))}
@@ -280,10 +280,10 @@ function EditExpModal({exp, onSave, onClose}) {
             <div style={{fontSize:11,color:"#5A5680",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:10}}>Pagamento</div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
               {PMS.map(p=>(
-                <button key={p.id} onClick={()=>setF(v=>({...v,pm:p.id}))} style={{background:f.pm===p.id?"#17133A":"#F9F9F9",border:"1.5px solid "+(f.pm===p.id?"#17133A":"#EBEBEB"),borderRadius:12,padding:"11px 10px",color:f.pm===p.id?"#fff":"#4a4a6a",fontSize:13,fontWeight:f.pm===p.id?700:500,cursor:"pointer",textAlign:"left"}}>{p.e} {p.l}</button>
+                <button key={p.id} onClick={()=>setF(v=>({...v,pm:p.id}))} style={{background:f.pm===p.id?"#17133A":"#F9F9F9",border:"1.5px solid "+(f.pm===p.id?"#17133A":"#EBEBEB"),borderRadius:12,padding:"11px 10px",color:f.pm===p.id?"#fff":"#4a4a6a",fontSize:13,fontWeight:f.pm===p.id?700:500,cursor:"pointer",textAlign:"left"}}><IcoLabel k={p.e} size={18} gap={8}>{p.l}</IcoLabel></button>
               ))}
             </div>
-            {bill&&<div style={{marginTop:12,background:"#EFEBFF",borderRadius:12,padding:"11px 14px",border:"1px solid #D9CFFF"}}><div style={{fontSize:12,color:"#5233E8",fontWeight:700}}>💳 Débito em {MONTHS[bill.month]}</div></div>}
+            {bill&&<div style={{marginTop:12,background:"#EFEBFF",borderRadius:12,padding:"11px 14px",border:"1px solid #D9CFFF"}}><div style={{fontSize:12,color:"#5233E8",fontWeight:700}}><Ico k="card" size={13} mr={4}/>Débito em {MONTHS[bill.month]}</div></div>}
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
             <button onClick={onClose} style={{background:"#F3F1FF",border:"none",borderRadius:18,padding:"15px",color:"#17133A",fontSize:15,fontWeight:700,cursor:"pointer"}}>Cancelar</button>
@@ -301,8 +301,8 @@ function EditIncModal({inc, onSave, onClose}) {
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={onClose}>
       <div style={{background:"#F3F1FF",borderRadius:"20px 20px 0 0",width:"100%",maxWidth:430,maxHeight:"85vh",overflowY:"auto",padding:"20px 14px calc(40px + env(safe-area-inset-bottom))",animation:"slideDown 0.25s ease"}} onClick={e=>e.stopPropagation()}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
-          <div style={{fontSize:16,fontWeight:800,color:"#17133A"}}>✏️ Editar Entrada</div>
-          <button onClick={onClose} style={{background:"#EBEBEB",border:"none",borderRadius:22,width:44,height:44,fontSize:16,cursor:"pointer",color:"#5A5680"}}>✕</button>
+          <div style={{fontSize:16,fontWeight:800,color:"#17133A"}}><IcoLabel k="edit" size={18}>Editar Entrada</IcoLabel></div>
+          <button onClick={onClose} style={{background:"#EBEBEB",border:"none",borderRadius:22,width:44,height:44,fontSize:16,cursor:"pointer",color:"#5A5680",display:"flex",alignItems:"center",justifyContent:"center"}}><Ico k="x" size={18}/></button>
         </div>
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
           <div style={{background:"#fff",borderRadius:22,padding:16,boxShadow:"0 1px 4px rgba(0,0,0,0.06)",border:"1px solid #ECE9FF",display:"flex",flexDirection:"column",gap:12}}>
@@ -328,7 +328,7 @@ function EditIncModal({inc, onSave, onClose}) {
             <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:7}}>
               {ITYPES.map(t=>(
                 <button key={t.id} onClick={()=>setF(v=>({...v,type:t.id}))} style={{background:f.type===t.id?t.c+"18":"#F9F9F9",border:"1.5px solid "+(f.type===t.id?t.c:"#EBEBEB"),borderRadius:12,padding:"9px 4px",fontSize:20,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
-                  <span>{t.e}</span>
+                  <Ico k={t.e} size={22} color={f.type===t.id?t.c:"#5A5680"}/>
                   <span style={{fontSize:8,color:f.type===t.id?t.c:"#5A5680",fontWeight:f.type===t.id?700:400,textAlign:"center"}}>{t.l}</span>
                 </button>
               ))}
@@ -353,6 +353,51 @@ const NAV_ICONS = {
   cmp:"M3 17l6-6 4 4 8-8M15 7h6v6",
   inv:"M3 7h15a3 3 0 013 3v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7zm0 0V6a2 2 0 012-2h11M16 14h.01"
 };
+// Ícones de linha (mesmo estilo da barra de navegação).
+const ICO = {
+  cart:"M3 4h2l2.3 10.6a2 2 0 002 1.6h7.9a2 2 0 002-1.5L20.5 8H6 M9.5 20.5h.01 M17.5 20.5h.01",
+  food:"M6 3v6a3 3 0 003 3v9 M12 3v6a3 3 0 01-3 3 M18 21V3c-2.5 1.5-4 4.5-4 8 0 1.5 1 3 4 3",
+  book:"M12 6.5C10.5 5 8 4.5 3 4.5v14c5 0 7.5.5 9 2 1.5-1.5 4-2 9-2v-14c-5 0-7.5.5-9 2z M12 6.5v14",
+  heart:"M12 20.5s-8-4.7-8-10.8A4.6 4.6 0 0112 7a4.6 4.6 0 018 2.7c0 6.1-8 10.8-8 10.8z",
+  car:"M5 17h14 M5 17a2 2 0 01-2-2v-3l2-5h14l2 5v3a2 2 0 01-2 2 M5 17v2 M19 17v2 M3 12h18 M7.5 14.5h.01 M16.5 14.5h.01",
+  smile:"M12 21a9 9 0 100-18 9 9 0 000 18z M8 14s1.5 2 4 2 4-2 4-2 M9 9.5h.01 M15 9.5h.01",
+  bag:"M6 2L3 6v13a2 2 0 002 2h14a2 2 0 002-2V6l-3-4z M3 6h18 M16 10a4 4 0 01-8 0",
+  home:"M3 11l9-8 9 8 M5 10v10h5v-6h4v6h5V10",
+  phone:"M7 2h10a2 2 0 012 2v16a2 2 0 01-2 2H7a2 2 0 01-2-2V4a2 2 0 012-2z M12 18h.01",
+  box:"M21 8l-9-5-9 5v8l9 5 9-5V8z M3 8l9 5 9-5 M12 13v8",
+  briefcase:"M4 7h16a1 1 0 011 1v11a1 1 0 01-1 1H4a1 1 0 01-1-1V8a1 1 0 011-1z M8 7V5a1 1 0 011-1h6a1 1 0 011 1v2 M3 13h18",
+  laptop:"M5 5h14a1 1 0 011 1v9H4V6a1 1 0 011-1z M2 19h20",
+  undo:"M9 14L4 9l5-5 M4 9h10a6 6 0 010 12h-3",
+  star:"M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z",
+  building:"M4 21V5a1 1 0 011-1h8a1 1 0 011 1v16 M14 9h5a1 1 0 011 1v11 M2 21h20 M8 8h2 M8 12h2 M8 16h2",
+  up:"M3 17l6-6 4 4 8-8 M15 7h6v6",
+  down:"M3 7l6 6 4-4 8 8 M15 17h6v-6",
+  gift:"M20 12v9H4v-9 M2 7h20v5H2z M12 22V7 M12 7H7.5a2.5 2.5 0 010-5C11 2 12 7 12 7z M12 7h4.5a2.5 2.5 0 000-5C13 2 12 7 12 7z",
+  bank:"M3 10l9-6 9 6 M5 10v8 M9.5 10v8 M14.5 10v8 M19 10v8 M3 21h18",
+  card:"M3 6h18a1 1 0 011 1v10a1 1 0 01-1 1H3a1 1 0 01-1-1V7a1 1 0 011-1z M2 10.5h20 M6 15h3",
+  trash:"M4 7h16 M10 11v6 M14 11v6 M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13 M9 7V4h6v3",
+  edit:"M4 20h4L19 9a2.1 2.1 0 00-3-3L5 17v3z M14 7l3 3",
+  x:"M6 6l12 12M18 6L6 18",
+  alert:"M12 3.5L2.5 20h19L12 3.5z M12 10v4 M12 17h.01",
+  upload:"M12 15V4 M8 8l4-4 4 4 M4 15v4a1 1 0 001 1h14a1 1 0 001-1v-4",
+  download:"M12 3v12m0 0l-4-4m4 4l4-4M4 19h16"
+};
+function Ico({k, size=20, color, mr=0, sw=2}) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{color, marginRight:mr, flexShrink:0, verticalAlign:"-0.22em", display:"inline-block"}}><path d={ICO[k]||ICO.box}/></svg>;
+}
+function IcoLabel({k, size=16, gap=6, color, children}) {
+  return <span style={{display:"inline-flex",alignItems:"center",gap}}><Ico k={k} size={size} color={color}/>{children}</span>;
+}
+function Logo({size=56}) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 64 64" role="img" aria-label="Prosperidade">
+      <rect width="64" height="64" rx="16" fill="#5233E8"/>
+      <rect x="14" y="36" width="9" height="14" rx="3" fill="#fff"/><rect x="27.5" y="28" width="9" height="22" rx="3" fill="#fff"/><rect x="41" y="18" width="9" height="32" rx="3" fill="#fff"/>
+      <circle cx="46" cy="12" r="5" fill="#FFD84D"/>
+    </svg>
+  );
+}
+
 function Icon({d,size=22,sw=2}) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={d}/></svg>;
 }
@@ -1136,8 +1181,8 @@ function MainApp({user, onLogout}) {
       const pmo=PMS.find(p=>p.id===r.pm);
       let k, label;
       if(r.kind==="entrada"){ k="entrada"; label="↑ Entradas"; }
-      else if(pmo?.isCard){ k=r.pm+"|"+r.billYear+"|"+r.billMonth; label=pmo.e+" "+pmo.l+" · Fatura "+MONTHS[r.billMonth]+"/"+r.billYear; }
-      else { k="corrente"; label="🏦 Conta Corrente · gastos"; }
+      else if(pmo?.isCard){ k=r.pm+"|"+r.billYear+"|"+r.billMonth; label=pmo.l+" · Fatura "+MONTHS[r.billMonth]+"/"+r.billYear; }
+      else { k="corrente"; label="Conta Corrente · gastos"; }
       if(!m[k]) m[k]={key:k,label,fileCount:0,fileTotal:0,newCount:0,newTotal:0};
       m[k].fileCount++; m[k].fileTotal+=r.amount;
       if(!st.skip){ m[k].newCount++; m[k].newTotal+=r.amount; }
@@ -1163,7 +1208,7 @@ function MainApp({user, onLogout}) {
 
   if(loading) return (
     <div style={{minHeight:"100vh",background:"#F3F1FF",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14}}>
-      <div style={{fontSize:52}}>💰</div>
+      <Logo size={64}/>
       <div style={{fontSize:24,fontWeight:800,color:"#17133A",letterSpacing:-0.5}}>Prosperidade</div>
       <div style={{width:32,height:32,border:"3px solid #E8E8E8",borderTop:"3px solid #5233E8",borderRadius:"50%",animation:"spin 0.8s linear infinite",marginTop:8}}/>
       <div style={{color:"#5A5680",fontSize:13}}>Carregando seus dados...</div>
@@ -1171,7 +1216,7 @@ function MainApp({user, onLogout}) {
   );
 
   // ── TABS CONFIG ──
-  const TABS = [["add","➕","Lançar"],["import","📥","Importar"],["dash","📊","Resumo"],["list","🗂️","Lista"],["cmp","📈","Meses"],["inv","💰","Invest"]];
+  const TABS = [["add","Lançar"],["import","Importar"],["dash","Resumo"],["list","Lista"],["cmp","Meses"],["inv","Invest"]];
 
   return (
     <div style={{maxWidth:430,margin:"0 auto",paddingBottom:"calc(100px + env(safe-area-inset-bottom))",background:"#F3F1FF",minHeight:"100vh"}}>
@@ -1258,7 +1303,7 @@ function MainApp({user, onLogout}) {
 
       {/* ── BOTTOM TABS ── */}
       <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:430,background:"#fff",borderRadius:"22px 22px 0 0",display:"flex",justifyContent:"space-around",alignItems:"center",zIndex:20,padding:"8px 6px calc(8px + env(safe-area-inset-bottom))",boxShadow:"0 -4px 18px rgba(82,51,232,0.10)"}}>
-        {TABS.map(([id,em,l])=>{
+        {TABS.map(([id,l])=>{
           const on=tab===id;
           return (
             <button key={id} onClick={()=>{setTab(id);setShowMonths(false);}} aria-label={l} aria-current={on?"page":undefined} style={on
@@ -1313,7 +1358,7 @@ function MainApp({user, onLogout}) {
                   <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:7}}>
                     {CATS.map(c=>(
                       <button key={c.id} onClick={()=>setEf(f=>({...f,cat:c.id}))} style={{background:ef.cat===c.id?c.c+"18":"#F9F9F9",border:"1.5px solid "+(ef.cat===c.id?c.c:"#EBEBEB"),borderRadius:12,padding:"9px 4px",fontSize:20,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3,transition:"all 0.15s"}}>
-                        <span>{c.e}</span>
+                        <Ico k={c.e} size={22} color={ef.cat===c.id?c.c:"#5A5680"}/>
                         <span style={{fontSize:8,color:ef.cat===c.id?c.c:"#5A5680",fontWeight:ef.cat===c.id?700:400,textAlign:"center",lineHeight:1.1}}>{c.l}</span>
                       </button>
                     ))}
@@ -1325,7 +1370,7 @@ function MainApp({user, onLogout}) {
                   <div style={{fontSize:11,color:"#5A5680",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:10}}>Pagamento</div>
                   <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
                     {PMS.map(p=>(
-                      <button key={p.id} onClick={()=>setEf(f=>({...f,pm:p.id}))} style={{background:ef.pm===p.id?"#17133A":"#F9F9F9",border:"1.5px solid "+(ef.pm===p.id?"#17133A":"#EBEBEB"),borderRadius:12,padding:"11px 10px",color:ef.pm===p.id?"#fff":"#4a4a6a",fontSize:13,fontWeight:ef.pm===p.id?700:500,cursor:"pointer",textAlign:"left",transition:"all 0.15s"}}>{p.e} {p.l}</button>
+                      <button key={p.id} onClick={()=>setEf(f=>({...f,pm:p.id}))} style={{background:ef.pm===p.id?"#17133A":"#F9F9F9",border:"1.5px solid "+(ef.pm===p.id?"#17133A":"#EBEBEB"),borderRadius:12,padding:"11px 10px",color:ef.pm===p.id?"#fff":"#4a4a6a",fontSize:13,fontWeight:ef.pm===p.id?700:500,cursor:"pointer",textAlign:"left",transition:"all 0.15s"}}><IcoLabel k={p.e} size={18} gap={8}>{p.l}</IcoLabel></button>
                     ))}
                   </div>
                   {ef.pm!=="corrente"&&ef.date&&(()=>{
@@ -1334,7 +1379,7 @@ function MainApp({user, onLogout}) {
                     const pm=PMS.find(p=>p.id===ef.pm);
                     return (
                       <div style={{marginTop:12,background:"#EFEBFF",borderRadius:12,padding:"11px 14px",border:"1px solid #D9CFFF"}}>
-                        <div style={{fontSize:12,color:"#5233E8",fontWeight:700,marginBottom:4}}>💳 {pm.l}</div>
+                        <div style={{fontSize:12,color:"#5233E8",fontWeight:700,marginBottom:4}}><Ico k="card" size={14} mr={5}/>{pm.l}</div>
                         <div style={{fontSize:12,color:"#5233E8",lineHeight:1.7}}>
                           Compra em {MONTHS[new Date(ef.date+"T12:00:00").getMonth()]} → Fatura fecha dia {closeDayOf(ef.pm)} → <strong>Débito no saldo de {MONTHS[bill.month]}/{bill.year}</strong>{efBillSel.on?" (escolhida por você)":" (estimada)"}
                         </div>
@@ -1385,7 +1430,7 @@ function MainApp({user, onLogout}) {
                   <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:7}}>
                     {ITYPES.map(t=>(
                       <button key={t.id} onClick={()=>setInf(f=>({...f,type:t.id}))} style={{background:inf.type===t.id?t.c+"18":"#F9F9F9",border:"1.5px solid "+(inf.type===t.id?t.c:"#EBEBEB"),borderRadius:12,padding:"9px 4px",fontSize:20,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3,transition:"all 0.15s"}}>
-                        <span>{t.e}</span>
+                        <Ico k={t.e} size={22} color={inf.type===t.id?t.c:"#5A5680"}/>
                         <span style={{fontSize:8,color:inf.type===t.id?t.c:"#5A5680",fontWeight:inf.type===t.id?700:400,textAlign:"center"}}>{t.l}</span>
                       </button>
                     ))}
@@ -1407,7 +1452,7 @@ function MainApp({user, onLogout}) {
                 Envie um arquivo <strong>.csv</strong> ou <strong>.xlsx</strong> com as colunas: <strong>data</strong> (AAAA-MM-DD), <strong>descricao</strong>, <strong>valor</strong>, <strong>tipo</strong> (gasto/entrada) e <strong>origem</strong> (corrente, card1, card2 ou card3). Para gastos de cartão, você pode incluir também a coluna opcional <strong>fatura</strong> (AAAA-MM) informando o mês exato da fatura — evita erro de arredondamento quando a compra é no fim do mês. Se não vier preenchida, o app estima pelo dia de fechamento do cartão e avisa na revisão.
               </div>
               <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls" onChange={handleFile} style={{display:"none"}}/>
-              <button onClick={()=>fileInputRef.current&&fileInputRef.current.click()} style={{background:"#5233E8",border:"none",borderRadius:18,padding:"14px",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer",width:"100%",boxShadow:"0 4px 14px rgba(82,51,232,0.3)"}}>📁 Escolher arquivo</button>
+              <button onClick={()=>fileInputRef.current&&fileInputRef.current.click()} style={{background:"#5233E8",border:"none",borderRadius:18,padding:"14px",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer",width:"100%",boxShadow:"0 4px 14px rgba(82,51,232,0.3)"}}><IcoLabel k="upload" size={18} gap={8}>Escolher arquivo</IcoLabel></button>
               {importErr&&<div style={{marginTop:10,background:"#FFF0EF",color:"#E8544A",borderRadius:10,padding:"9px 12px",fontSize:12,fontWeight:600}}>{importErr}</div>}
             </div>
 
@@ -1448,7 +1493,7 @@ function MainApp({user, onLogout}) {
 
                 {autoBillCount>0&&(
                   <div style={{background:"#FFF8E6",borderRadius:18,padding:"12px 14px",marginBottom:10,border:"1px solid #F5E1A4"}}>
-                    <div style={{fontSize:12,fontWeight:700,color:"#B7791F",marginBottom:4}}>⚠ {autoBillCount} linha(s) de cartão sem a coluna "fatura"</div>
+                    <div style={{fontSize:12,fontWeight:700,color:"#B7791F",marginBottom:4}}><Ico k="alert" size={14} mr={5}/>{autoBillCount} linha(s) de cartão sem a coluna "fatura"</div>
                     <div style={{fontSize:11,color:"#B7791F",lineHeight:1.6,marginBottom:8}}>O mês da fatura foi estimado pelo dia de fechamento. Como um arquivo costuma ser uma única fatura, escolha o mês correto e aplique a todas:</div>
                     <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
                       <select value={bulkBill.month} onChange={e=>setBulkBill(b=>({...b,month:parseInt(e.target.value,10)}))} style={SS}>
@@ -1476,19 +1521,19 @@ function MainApp({user, onLogout}) {
                     {rowStatus[idx]&&rowStatus[idx].invalid&&<div style={{fontSize:10,color:"#E8544A",background:"#FFF0EF",display:"inline-block",padding:"2px 8px",borderRadius:20,marginBottom:8,marginRight:6,fontWeight:700}}>✕ data ou valor inválido — será ignorada</div>}
                     {rowStatus[idx]&&rowStatus[idx].dup&&!rowStatus[idx].invalid&&(
                       <div style={{display:"inline-flex",alignItems:"center",gap:6,marginBottom:8,marginRight:6}}>
-                        <span style={{fontSize:10,color:"#E8544A",background:"#FFF0EF",padding:"2px 8px",borderRadius:20,fontWeight:700}}>⚠ já importado</span>
+                        <span style={{fontSize:10,color:"#E8544A",background:"#FFF0EF",padding:"2px 8px",borderRadius:20,fontWeight:700}}><Ico k="alert" size={11} mr={3}/>já importado</span>
                         <button onClick={()=>updateRow(idx,{forceInclude:!row.forceInclude})} style={{fontSize:10,background:"transparent",border:"1px solid #E8E8E8",borderRadius:20,padding:"2px 8px",color:"#5A5680",cursor:"pointer",fontWeight:600}}>{row.forceInclude?"Ignorar":"Importar mesmo assim"}</button>
                       </div>
                     )}
                     {rowStatus[idx]&&rowStatus[idx].payment&&!rowStatus[idx].invalid&&(
                       <div style={{display:"inline-flex",alignItems:"center",gap:6,marginBottom:8,marginRight:6}}>
-                        <span style={{fontSize:10,color:"#5233E8",background:"#EFEBFF",padding:"2px 8px",borderRadius:20,fontWeight:700}}>💳 pagamento de fatura — ignorado (evita contar em dobro)</span>
+                        <span style={{fontSize:10,color:"#5233E8",background:"#EFEBFF",padding:"2px 8px",borderRadius:20,fontWeight:700}}><Ico k="card" size={12} mr={4}/>pagamento de fatura — ignorado (evita contar em dobro)</span>
                         <button onClick={()=>updateRow(idx,{forceInclude:!row.forceInclude})} style={{fontSize:10,background:"transparent",border:"1px solid #E8E8E8",borderRadius:20,padding:"2px 8px",color:"#5A5680",cursor:"pointer",fontWeight:600}}>{row.forceInclude?"Ignorar":"Importar mesmo assim"}</button>
                       </div>
                     )}
                     {rowStatus[idx]&&rowStatus[idx].manual&&(
                       <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:8}}>
-                        <span style={{fontSize:10,color:"#B7791F",background:"#FFF8E6",padding:"2px 8px",borderRadius:20,fontWeight:700}}>{"✏️ parece o lançamento manual “"+rowStatus[idx].manual.desc+"” de "+(rowStatus[idx].manual.date||"").split("-").reverse().join("/")}</span>
+                        <span style={{fontSize:10,color:"#B7791F",background:"#FFF8E6",padding:"2px 8px",borderRadius:20,fontWeight:700}}>{"parece o lançamento manual “"+rowStatus[idx].manual.desc+"” de "+(rowStatus[idx].manual.date||"").split("-").reverse().join("/")}</span>
                         {[["replace","Substituir o manual"],["keep","Manter os dois"]].map(([v,l])=>{
                           const on=(row.manualAction||"replace")===v;
                           return <button key={v} onClick={()=>updateRow(idx,{manualAction:v})} style={{fontSize:10,background:on?"#17133A":"transparent",color:on?"#fff":"#5A5680",border:"1px solid "+(on?"#17133A":"#E8E8E8"),borderRadius:20,padding:"2px 8px",cursor:"pointer",fontWeight:600}}>{l}</button>;
@@ -1507,10 +1552,10 @@ function MainApp({user, onLogout}) {
                       </select>
                       {row.kind==="gasto"
                         ? <select value={row.cat} onChange={e=>updateRow(idx,{cat:e.target.value})} style={SS}>
-                            {CATS.map(c=><option key={c.id} value={c.id}>{c.e} {c.l}</option>)}
+                            {CATS.map(c=><option key={c.id} value={c.id}>{c.l}</option>)}
                           </select>
                         : <select value={row.incType} onChange={e=>updateRow(idx,{incType:e.target.value})} style={SS}>
-                            {ITYPES.map(t=><option key={t.id} value={t.id}>{t.e} {t.l}</option>)}
+                            {ITYPES.map(t=><option key={t.id} value={t.id}>{t.l}</option>)}
                           </select>
                       }
                       <select value={row.pm} onChange={e=>{
@@ -1523,7 +1568,7 @@ function MainApp({user, onLogout}) {
                         }
                         updateRow(idx,patch);
                       }} style={SS}>
-                        {PMS.map(p=><option key={p.id} value={p.id}>{p.e} {p.l}</option>)}
+                        {PMS.map(p=><option key={p.id} value={p.id}>{p.l}</option>)}
                       </select>
                       {PMS.find(p=>p.id===row.pm)?.isCard && (
                         <>
@@ -1533,7 +1578,7 @@ function MainApp({user, onLogout}) {
                           <input type="number" value={row.billYear ?? ""} onChange={e=>updateRow(idx,{billYear:parseInt(e.target.value,10),billSource:"manual"})} style={{...SS,width:72}} title="Ano da fatura"/>
                         </>
                       )}
-                      <button onClick={()=>removeRow(idx)} style={{background:"transparent",border:"none",color:"#D1D1D1",fontSize:16,cursor:"pointer",marginLeft:"auto"}}>🗑️</button>
+                      <button onClick={()=>removeRow(idx)} style={{background:"transparent",border:"none",color:"#D92D6F",fontSize:16,cursor:"pointer",marginLeft:"auto"}}><Ico k="trash" size={18}/></button>
                     </div>
                   </div>
                 ))}
@@ -1578,7 +1623,7 @@ function MainApp({user, onLogout}) {
 
             <div style={{background:"#fff",borderRadius:22,padding:16,marginTop:14,boxShadow:shadow,border:"1px solid #ECE9FF"}}>
               <div style={{fontSize:11,color:"#5A5680",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:10}}>Backup e conta</div>
-              <button onClick={downloadBackup} style={{background:"#17133A",border:"none",borderRadius:18,padding:"13px",color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer",width:"100%"}}>⬇ Baixar backup (JSON)</button>
+              <button onClick={downloadBackup} style={{background:"#17133A",border:"none",borderRadius:18,padding:"13px",color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer",width:"100%"}}><IcoLabel k="download" size={18} gap={8}>Baixar backup (JSON)</IcoLabel></button>
               <div style={{fontSize:11,color:"#5A5680",marginTop:6}}>{lastBackup?"Último backup: "+new Date(lastBackup).toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}):"Nenhum backup baixado neste aparelho ainda."}</div>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:14,paddingTop:12,borderTop:"1px solid #F3F3F3"}}>
                 <span style={{fontSize:12,color:"#5A5680",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginRight:8}}>{user&&user.email}</span>
@@ -1663,7 +1708,7 @@ function MainApp({user, onLogout}) {
                 {byType.map(t=>(
                   <div key={t.id} style={{marginBottom:12}}>
                     <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
-                      <span style={{fontSize:13,fontWeight:600}}>{t.e} {t.l}</span>
+                      <span style={{fontSize:13,fontWeight:600}}><IcoLabel k={t.e}>{t.l}</IcoLabel></span>
                       <span style={{fontSize:13,fontWeight:700,color:t.c}}>{fmt(t.total)}</span>
                     </div>
                     <Bar value={t.total} max={maxType} color={t.c}/>
@@ -1678,7 +1723,7 @@ function MainApp({user, onLogout}) {
               {byCat.map(c=>(
                 <div key={c.id} style={{marginBottom:14}}>
                   <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
-                    <span style={{fontSize:13,fontWeight:600}}>{c.e} {c.l}</span>
+                    <span style={{fontSize:13,fontWeight:600}}><IcoLabel k={c.e}>{c.l}</IcoLabel></span>
                     <span style={{fontSize:13,fontWeight:700,color:c.c}}>{fmt(c.total)}</span>
                   </div>
                   <Bar value={c.total} max={maxCat} color={c.c}/>
@@ -1704,7 +1749,7 @@ function MainApp({user, onLogout}) {
               return (
                 <div key={r.id} style={{background:"#fff",borderRadius:18,padding:"12px 14px",boxShadow:shadow,display:"flex",flexDirection:"column",gap:8}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:8}}>
-                    <span style={{fontSize:15,fontWeight:800}}>{r.e} {r.l}</span>
+                    <span style={{fontSize:15,fontWeight:800}}><IcoLabel k={r.e}>{r.l}</IcoLabel></span>
                     <span style={{fontSize:13,fontWeight:700,color:"#5A5680"}}>{numK(r.spent)} de {numK(r.limit)}</span>
                   </div>
                   <div style={{height:10,borderRadius:99,background:"#ECE9FF"}}><div style={{width:Math.min(100,r.ratio*100)+"%",height:10,borderRadius:99,background:col}}/></div>
@@ -1718,7 +1763,7 @@ function MainApp({user, onLogout}) {
                 <div style={{fontSize:12,color:"#5A5680",fontWeight:800}}>Teto mensal por categoria (deixe vazio para não ter teto)</div>
                 {CATS.map(c=>(
                   <div key={c.id} style={{display:"flex",alignItems:"center",gap:10}}>
-                    <span style={{flex:1,fontSize:14,fontWeight:700}}>{c.e} {c.l}</span>
+                    <span style={{flex:1,fontSize:14,fontWeight:700}}><IcoLabel k={c.e}>{c.l}</IcoLabel></span>
                     <div style={{position:"relative",width:150}}>
                       <span style={{position:"absolute",left:13,top:"50%",transform:"translateY(-50%)",color:"#5A5680",fontSize:13,fontWeight:600}}>R$</span>
                       <input inputMode="decimal" placeholder="sem teto" value={budDraft[c.id]??""} onChange={e=>setBudDraft(d=>({...d,[c.id]:e.target.value}))} style={{...IS,paddingLeft:38,minHeight:44}}/>
@@ -1766,11 +1811,11 @@ function MainApp({user, onLogout}) {
                   const per=PERSONS.find(p=>p.id===e.person);
                   return (
                     <div key={e.id} style={{background:"#fff",borderRadius:18,padding:"13px 14px",marginBottom:8,boxShadow:shadow,border:"1px solid #ECE9FF",display:"flex",alignItems:"flex-start",gap:12,animation:"fadeIn 0.2s ease"}}>
-                      <div style={{width:42,height:42,borderRadius:12,background:(cat?.c||"#94A3B8")+"15",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>{cat?.e||"📦"}</div>
+                      <div style={{width:42,height:42,borderRadius:12,background:(cat?.c||"#94A3B8")+"15",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}><Ico k={cat?.e||"box"} size={22} color={cat?.c||"#94A3B8"}/></div>
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{display:"flex",gap:5,marginBottom:5,flexWrap:"wrap"}}>
                           <span style={{fontSize:11,background:per?.color+"15",color:per?.color,borderRadius:20,padding:"2px 9px",fontWeight:700}}>{per?.name}</span>
-                          {e.isCard&&<span style={{fontSize:11,background:"#EFEBFF",color:"#5233E8",borderRadius:20,padding:"2px 9px",fontWeight:600}}>💳 Débito em {e.billMonth!=null?MONTHS[e.billMonth]:""}</span>}
+                          {e.isCard&&<span style={{fontSize:11,background:"#EFEBFF",color:"#5233E8",borderRadius:20,padding:"2px 9px",fontWeight:600}}><Ico k="card" size={13} mr={4}/>Débito em {e.billMonth!=null?MONTHS[e.billMonth]:""}</span>}
                         </div>
                         <div style={{fontSize:14,fontWeight:700,color:"#17133A",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{e.desc}</div>
                         <div style={{fontSize:12,color:"#5A5680",marginTop:3}}>{cat?.l} · {pm?.l} · {(e.date||"").split("-").reverse().join("/")}</div>
@@ -1778,8 +1823,8 @@ function MainApp({user, onLogout}) {
                       <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6,flexShrink:0}}>
                         <span style={{fontSize:15,fontWeight:800,color:e.isCard?"#5233E8":cat?.c||"#17133A"}}>{fmt(e.amount)}</span>
                         <div style={{display:"flex",gap:8}}>
-                          <button onClick={()=>setEditExp(e)} style={{background:"transparent",border:"none",color:"#B0B0C0",fontSize:15,cursor:"pointer",padding:"10px 8px",lineHeight:1}}>✏️</button>
-                          <button onClick={()=>setConfirmDel({msg:e.desc+" — "+fmt(e.amount),onConfirm:()=>delExp(e.id)})} style={{background:"transparent",border:"none",color:"#D1D1D1",fontSize:17,cursor:"pointer",padding:"10px 8px",lineHeight:1}}>🗑️</button>
+                          <button aria-label="Editar" onClick={()=>setEditExp(e)} style={{background:"transparent",border:"none",color:"#5A5680",fontSize:15,cursor:"pointer",padding:"10px 8px",lineHeight:1}}><Ico k="edit" size={18}/></button>
+                          <button aria-label="Excluir" onClick={()=>setConfirmDel({msg:e.desc+" — "+fmt(e.amount),onConfirm:()=>delExp(e.id)})} style={{background:"transparent",border:"none",color:"#D92D6F",fontSize:17,cursor:"pointer",padding:"10px 8px",lineHeight:1}}><Ico k="trash" size={18}/></button>
                         </div>
                       </div>
                     </div>
@@ -1801,7 +1846,7 @@ function MainApp({user, onLogout}) {
                   const per=PERSONS.find(p=>p.id===i.person);
                   return (
                     <div key={i.id} style={{background:"#fff",borderRadius:18,padding:"13px 14px",marginBottom:8,boxShadow:shadow,border:"1px solid #ECE9FF",display:"flex",alignItems:"center",gap:12,animation:"fadeIn 0.2s ease"}}>
-                      <div style={{width:42,height:42,borderRadius:12,background:(tp?.c||"#00A86B")+"15",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>{tp?.e||"💰"}</div>
+                      <div style={{width:42,height:42,borderRadius:12,background:(tp?.c||"#00A86B")+"15",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}><Ico k={tp?.e||"box"} size={22} color={tp?.c||"#00A86B"}/></div>
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{marginBottom:5}}><span style={{fontSize:11,background:per?.color+"15",color:per?.color,borderRadius:20,padding:"2px 9px",fontWeight:700}}>{per?.name}</span></div>
                         <div style={{fontSize:14,fontWeight:700,color:"#17133A",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{i.desc}</div>
@@ -1810,8 +1855,8 @@ function MainApp({user, onLogout}) {
                       <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6}}>
                         <span style={{fontSize:15,fontWeight:800,color:"#00A86B"}}>+{fmt(i.amount)}</span>
                         <div style={{display:"flex",gap:8}}>
-                          <button onClick={()=>setEditInc(i)} style={{background:"transparent",border:"none",color:"#B0B0C0",fontSize:15,cursor:"pointer",padding:"10px 8px"}}>✏️</button>
-                          <button onClick={()=>setConfirmDel({msg:i.desc+" — "+fmt(i.amount),onConfirm:()=>delInc(i.id)})} style={{background:"transparent",border:"none",color:"#D1D1D1",fontSize:17,cursor:"pointer",padding:"10px 8px"}}>🗑️</button>
+                          <button aria-label="Editar" onClick={()=>setEditInc(i)} style={{background:"transparent",border:"none",color:"#5A5680",fontSize:15,cursor:"pointer",padding:"10px 8px"}}><Ico k="edit" size={18}/></button>
+                          <button aria-label="Excluir" onClick={()=>setConfirmDel({msg:i.desc+" — "+fmt(i.amount),onConfirm:()=>delInc(i.id)})} style={{background:"transparent",border:"none",color:"#D92D6F",fontSize:17,cursor:"pointer",padding:"10px 8px"}}><Ico k="trash" size={18}/></button>
                         </div>
                       </div>
                     </div>
@@ -1942,7 +1987,7 @@ function MainApp({user, onLogout}) {
 
             {diffP&&(
               <div style={{background:"#fff",borderRadius:18,padding:"13px 16px",marginBottom:16,boxShadow:shadow,border:"1px solid #ECE9FF",display:"flex",alignItems:"center",gap:12}}>
-                <div style={{width:44,height:44,borderRadius:12,background:diff>0?"#FFF0EF":"#F0FFF8",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>{diff>0?"📈":"📉"}</div>
+                <div style={{width:44,height:44,borderRadius:12,background:diff>0?"#FFF0EF":"#F0FFF8",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}><Ico k={diff>0?"up":"down"} size={22} color={diff>0?"#D92D6F":"#12A06B"}/></div>
                 <div>
                   <div style={{fontWeight:700,color:diff>0?"#E8544A":"#00A86B",fontSize:14}}>{diff>0?"Gastou "+fmt(Math.abs(diff))+" a mais":"Economizou "+fmt(Math.abs(diff))}</div>
                   <div style={{fontSize:12,color:"#5A5680",marginTop:2}}>vs. {MONTHS[prevM]} ({diff>0?"+":"-"}{Math.abs(diffP)}%)</div>
@@ -1960,7 +2005,7 @@ function MainApp({user, onLogout}) {
                 return (
                   <div key={c.id} style={{marginBottom:16}}>
                     <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
-                      <span style={{fontSize:13,fontWeight:600,color:"#17133A"}}>{c.e} {c.l}</span>
+                      <span style={{fontSize:13,fontWeight:600,color:"#17133A"}}><IcoLabel k={c.e}>{c.l}</IcoLabel></span>
                       <span style={{fontSize:12,fontWeight:700,color:cd>0?"#E8544A":"#00A86B"}}>{cd>0?"+":""}{fmt(cd)}</span>
                     </div>
                     {[{lbl:MONTHS[prevM],val:prev,col:"#D1D1D1"},{lbl:MONTHS[month],val:curr,col:c.c}].map(row=>(
@@ -2079,8 +2124,8 @@ function MainApp({user, onLogout}) {
                         <div style={{fontSize:16,fontWeight:800,color:a.color}}>{fmt(a.balance)}</div>
                         <div style={{fontSize:11,color:"#5A5680",marginTop:1}}>{pct}% do portfólio</div>
                         <div style={{display:"flex",gap:12,justifyContent:"flex-end",marginTop:4}}>
-                          <button onClick={()=>setEditAcc(a)} style={{background:"transparent",border:"none",color:"#5233E8",fontSize:13,fontWeight:700,cursor:"pointer"}}>✏️ Editar</button>
-                          <button onClick={()=>delAcc(a.id)} style={{background:"transparent",border:"none",color:"#D1D1D1",fontSize:13,cursor:"pointer"}}>✕ Remover</button>
+                          <button onClick={()=>setEditAcc(a)} style={{background:"transparent",border:"none",color:"#5233E8",fontSize:13,fontWeight:700,cursor:"pointer"}}><IcoLabel k="edit" size={18}>Editar</IcoLabel></button>
+                          <button onClick={()=>delAcc(a.id)} style={{background:"transparent",border:"none",color:"#D92D6F",fontSize:13,cursor:"pointer"}}><IcoLabel k="trash" size={16} gap={4}>Remover</IcoLabel></button>
                         </div>
                       </div>
                     </div>
@@ -2144,7 +2189,7 @@ function MainApp({user, onLogout}) {
                     </div>
                     <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
                       <span style={{fontSize:14,fontWeight:800,color:delta<0?"#E8544A":t.c}}>{delta<0?"−":"+"}{fmt(Math.abs(delta))}</span>
-                      <button title="Editar movimentação" onClick={()=>setEditMov(c)} style={{background:"transparent",border:"none",fontSize:15,cursor:"pointer"}}>✏️</button>
+                      <button aria-label="Editar movimentação" onClick={()=>setEditMov(c)} style={{background:"transparent",border:"none",fontSize:15,cursor:"pointer"}}><Ico k="edit" size={18}/></button>
                     </div>
                   </div>
                 );
@@ -2191,8 +2236,8 @@ function EditAccModal({acc, onSave, onClose}) {
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={onClose}>
       <div style={{background:"#F3F1FF",borderRadius:"20px 20px 0 0",width:"100%",maxWidth:430,maxHeight:"90vh",overflowY:"auto",padding:"20px 14px calc(40px + env(safe-area-inset-bottom))",animation:"slideDown 0.25s ease"}} onClick={e=>e.stopPropagation()}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
-          <div style={{fontSize:16,fontWeight:800,color:"#17133A"}}>✏️ Editar conta</div>
-          <button onClick={onClose} style={{background:"#EBEBEB",border:"none",borderRadius:22,width:44,height:44,fontSize:16,cursor:"pointer",color:"#5A5680"}}>✕</button>
+          <div style={{fontSize:16,fontWeight:800,color:"#17133A"}}><IcoLabel k="edit" size={18}>Editar conta</IcoLabel></div>
+          <button onClick={onClose} style={{background:"#EBEBEB",border:"none",borderRadius:22,width:44,height:44,fontSize:16,cursor:"pointer",color:"#5A5680",display:"flex",alignItems:"center",justifyContent:"center"}}><Ico k="x" size={18}/></button>
         </div>
         <div style={{background:"#fff",borderRadius:22,padding:16,boxShadow:shadow,border:"1px solid #ECE9FF",display:"flex",flexDirection:"column",gap:12}}>
           <input placeholder="Nome (ex: Tesouro Selic)" value={f.name} onChange={e=>setF(v=>({...v,name:e.target.value}))} style={IS}/>
@@ -2220,8 +2265,8 @@ function EditMoveModal({mov, accounts, onSave, onDelete, onClose}) {
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={onClose}>
       <div style={{background:"#F3F1FF",borderRadius:"20px 20px 0 0",width:"100%",maxWidth:430,maxHeight:"90vh",overflowY:"auto",padding:"20px 14px calc(40px + env(safe-area-inset-bottom))",animation:"slideDown 0.25s ease"}} onClick={e=>e.stopPropagation()}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
-          <div style={{fontSize:16,fontWeight:800,color:"#17133A"}}>✏️ Editar movimentação</div>
-          <button onClick={onClose} style={{background:"#EBEBEB",border:"none",borderRadius:22,width:44,height:44,fontSize:16,cursor:"pointer",color:"#5A5680"}}>✕</button>
+          <div style={{fontSize:16,fontWeight:800,color:"#17133A"}}><IcoLabel k="edit" size={18}>Editar movimentação</IcoLabel></div>
+          <button onClick={onClose} style={{background:"#EBEBEB",border:"none",borderRadius:22,width:44,height:44,fontSize:16,cursor:"pointer",color:"#5A5680",display:"flex",alignItems:"center",justifyContent:"center"}}><Ico k="x" size={18}/></button>
         </div>
         <div style={{background:"#fff",borderRadius:22,padding:16,boxShadow:shadow,border:"1px solid #ECE9FF",display:"flex",flexDirection:"column",gap:12}}>
           <select value={f.accId} onChange={e=>setF(v=>({...v,accId:e.target.value}))} style={{...IS,padding:"13px 14px"}}>
@@ -2249,7 +2294,7 @@ function EditMoveModal({mov, accounts, onSave, onDelete, onClose}) {
 function LoadingScreen({text}) {
   return (
     <div style={{minHeight:"100vh",background:"#F3F1FF",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14}}>
-      <div style={{fontSize:52}}>💰</div>
+      <Logo size={64}/>
       <div style={{fontSize:24,fontWeight:800,color:"#17133A",letterSpacing:-0.5}}>Prosperidade</div>
       <div style={{width:32,height:32,border:"3px solid #E8E8E8",borderTop:"3px solid #5233E8",borderRadius:"50%",animation:"spin 0.8s linear infinite",marginTop:8}}/>
       <div style={{color:"#5A5680",fontSize:13}}>{text}</div>
@@ -2264,7 +2309,7 @@ function LoginScreen({onLogin, onReset, error, info, busy}) {
     <div style={{minHeight:"100vh",background:"#F3F1FF",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
       <div style={{width:"100%",maxWidth:360,background:"#fff",borderRadius:20,padding:24,boxShadow:shadowMd,border:"1px solid #ECE9FF"}}>
         <div style={{textAlign:"center",marginBottom:18}}>
-          <div style={{fontSize:44}}>💰</div>
+          <Logo size={56}/>
           <div style={{fontSize:22,fontWeight:800,color:"#17133A",letterSpacing:-0.5}}>Prosperidade</div>
           <div style={{fontSize:12,color:"#5A5680",marginTop:4}}>Entre para ver as finanças da família</div>
         </div>
