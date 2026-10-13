@@ -29,6 +29,10 @@
   /* 16px evita o zoom automático do iPhone ao tocar num campo */
   input,select,textarea{font-size:16px !important}
   button{touch-action:manipulation}
+  /* campo de data do iPhone: não deixa estourar a largura do cartão */
+  input[type=date]{display:block;width:100%;min-width:0;max-width:100%;-webkit-appearance:none;appearance:none;text-align:left;line-height:1.2}
+  input[type=date]::-webkit-date-and-time-value{text-align:left;min-height:1.2em}
+  input,select{min-width:0;max-width:100%}
   input:focus,select:focus{outline:none;border-color:#5233E8 !important}
   select option{background:#fff}
   ::-webkit-scrollbar{width:0;height:0}
@@ -39,6 +43,353 @@
 </head>
 <body>
 <div id="root"></div>
+<script>
+// ===== Leitor de faturas em PDF (sem dependências; recebe "palavras" com posição) =====
+// word = {t:"texto", x0, y0, x1, y1}; page = {w, h, words:[...]}
+const PP = (function(){
+  const brNum = s => {
+    let t = String(s||"").replace(/[Rr]\$/g,"").replace(/\s+/g,"").replace(/[—–−~]/g,"-");
+    const neg = /^-/.test(t) || /-$/.test(t);
+    t = t.replace(/-/g,"");
+    // aceita ponto OU vírgula como separador de milhar (o OCR às vezes troca): 1.000,20 / 1,000,20
+    if(!/^\d{1,3}(?:[.,]\d{3})*,\d{2}$|^\d+,\d{2}$/.test(t)) return NaN;
+    const v = parseInt(t.replace(/[.,]/g,""),10)/100;
+    return neg ? -v : v;
+  };
+  const AMT = "[-~—]?\\s?\\d{1,3}(?:[.,]\\d{3})*,\\d{2}|[-~—]?\\s?\\d+,\\d{2}";
+  const r2 = n => Math.round(n*100)/100;
+
+  // agrupa palavras em linhas (por y) e ordena por x
+  function buildLines(words){
+    const ws = words.filter(w=>w.t && w.t.trim()).map(w=>({...w,cy:(w.y0+w.y1)/2,h:w.y1-w.y0}));
+    ws.sort((a,b)=>a.cy-b.cy);
+    const hs = ws.map(w=>w.h).sort((a,b)=>a-b); const med = hs.length? hs[Math.floor(hs.length/2)]:10;
+    const tol = Math.max(3, med*0.55);
+    const lines=[]; let cur=null;
+    ws.forEach(w=>{
+      if(cur && Math.abs(w.cy-cur.cy)<=tol){ cur.items.push(w); cur.cy=(cur.cy*(cur.items.length-1)+w.cy)/cur.items.length; }
+      else { cur={cy:w.cy,items:[w]}; lines.push(cur); }
+    });
+    lines.forEach(l=>{ l.items.sort((a,b)=>a.x0-b.x0); l.text=l.items.map(i=>i.t).join(" ").replace(/\s+/g," ").trim(); });
+    return lines;
+  }
+
+  function cleanDesc(raw){
+    let s = String(raw||"").replace(/\s+/g," ").trim();
+    s = s.replace(/^[^A-Za-z0-9*]+/,"").replace(/[\s\-–.,;:]+$/,"");
+    s = s.replace(/\s+(LTDA|S\/A|SA|EIRELI|EPP)\.?$/i,"");
+    if(!/[a-z]/.test(s)){
+      s = s.toLowerCase().replace(/(^|[\s*\-\/(])([a-zà-ú])/g,(m,p,c)=>p+c.toUpperCase());
+      s = s.replace(/\s(De|Da|Do|Das|Dos|E|Em)\s/g,m=>m.toLowerCase());
+    }
+    return s;
+  }
+
+  // dd/mm de uma compra -> AAAA-MM-DD. A compra é anterior (ou do mesmo mês) à 1ª parcela na fatura.
+  function inferDate(dd,mm,fat,n){
+    const base = fat ? (fat.year*12+fat.month) : (new Date().getFullYear()*12+new Date().getMonth());
+    const refIdx = base - Math.max(0,(n||1)-1);
+    const refY = Math.floor(refIdx/12), refM = refIdx%12;
+    const refEnd = new Date(refY, refM+1, 0, 23, 59);
+    let y = refY;
+    if(new Date(y, mm-1, dd, 12) > refEnd) y--;
+    return y+"-"+String(mm).padStart(2,"0")+"-"+String(dd).padStart(2,"0");
+  }
+
+  function mkRow(o){
+    const parc = o.parc && o.parc.n>0 ? " (parcela "+o.parc.n+"/"+o.parc.m+")" : "";
+    return {date:o.date, desc:cleanDesc(o.desc)+parc, amount:r2(Math.abs(o.amount)), kind:o.kind, card:o.card||null,
+            section:o.section||"", raw:o.raw||"", parcN:o.parc?o.parc.n:0, parcM:o.parc?o.parc.m:0};
+  }
+
+  // ------------------- SANTANDER (Visa/Master; texto vindo de OCR) -------------------
+  const SAN_TX = new RegExp("(?:^|\\s)(\\d{2})\\/(\\d{2})\\s+(.+?)\\s+(?:(\\d{2})\\/(\\d{2})\\s+)?("+AMT+")(?:\\s+\\d{1,3}(?:[.,]\\d{3})*,\\d{2})?\\s*$");
+  function parseSantander(pages, meta){
+    meta = meta||{};
+    const out = {issuer:"santander", rows:[], checks:[], fatura:null, notes:[], brand:null, cards:[], expectedGross:null, expectedNet:null, vencimento:null};
+    // mês da fatura: título do arquivo (Fatura_MMAAAA_...) > vencimento > pagamento anterior
+    const tm = /Fatura_(\d{2})(\d{4})/i.exec(meta.title||"") || /Fatura[_ ](\d{2})(\d{4})/i.exec(meta.fileName||"");
+    if(tm && +tm[1]>=1 && +tm[1]<=12) out.fatura = {year:+tm[2], month:+tm[1]-1, src:"arquivo"};
+    const p1txt = (pages[0]?buildLines(pages[0].words).map(l=>l.text).join(" "):"");
+    if(!out.fatura){
+      const vm = /Vencimento\s+(\d{2})\/(\d{2})\/(\d{4})/i.exec(p1txt);
+      if(vm) out.fatura = {year:+vm[3], month:+vm[2]-1, src:"vencimento"};
+    }
+    const vm2 = /Vencimento\s+(\d{2}\/\d{2}\/\d{4})/i.exec(p1txt); if(vm2) out.vencimento = vm2[1];
+    const tp = /Total a Pagar\s+R?\$?\s*([\d.]+,\d{2})/i.exec(p1txt); if(tp) out.totalPagar = brNum(tp[1]);
+
+    // linhas na ordem de leitura: página a página, coluna esquerda e depois direita
+    const ordered=[];
+    pages.forEach((pg,pi)=>{
+      const midX = pg.w*0.51;
+      const L = pg.words.filter(w=>(w.x0+w.x1)/2 < midX), R = pg.words.filter(w=>(w.x0+w.x1)/2 >= midX);
+      buildLines(L).forEach(l=>ordered.push({...l,page:pi,col:0}));
+      buildLines(R).forEach(l=>ordered.push({...l,page:pi,col:1}));
+    });
+    let card=null, mode=null, inDetail=false, secSum={}, secTotal={}, inResumo=false;
+    const pending=[];
+    ordered.forEach(l=>{
+      const t = l.text;
+      if(/Detalhamento/i.test(t) || l.page>=1){ inDetail=true; }
+      if(/Detalhamento/i.test(t)){ inResumo=false; return; }
+      const ch = /(\d{2}\s?\d{2})\s+\S{3,5}\s+\S{3,5}\s+(\d{4})\s*$/.exec(t);
+      if(ch && !SAN_TX.test(t) && /[A-Za-z]{3}/.test(t)){ card={first:ch[1].replace(/\s/g,""), last:ch[2]}; mode=null; inResumo=false;
+        if(!out.cards.find(c=>c.last===card.last)) out.cards.push({...card}); secSum[card.last]=secSum[card.last]||0; return; }
+      if(/^Resumo da Fatura/i.test(t)){ inResumo=true; mode=null; return; }
+      if(/Saldo total consolidado/i.test(t)){ inResumo=false; mode=null; return; }
+      if(inResumo){
+        const g = re => { const m=re.exec(t); return m?brNum(m[1]):null; };
+        let v;
+        if((v=g(/Saldo Anterior\s+([\d.]+,\d{2})/i))!=null) out.saldoAnterior=v;
+        if((v=g(/Despesas\/D[eé]bitos no Brasil\s+([\d.]+,\d{2})/i))!=null) out.expectedGross=v;
+        if((v=g(/Despesas\/D[eé]bitos no Exterior\s+([\d.]+,\d{2})/i))!=null) out.exterior=v;
+        if((v=g(/Total de pagamentos\s+([\d.]+,\d{2})/i))!=null) out.totalPagamentos=v;
+        if((v=g(/Total de cr[eé]ditos\s+([\d.]+,\d{2})/i))!=null) out.totalCreditos=v;
+        if((v=g(/Saldo Desta Fatura\s+([\d.]+,\d{2})/i))!=null) out.expectedNet=v;
+        return;
+      }
+      if(!inDetail||!card) return;
+      if(/^Pagamentos?\s+e\s+Demais\s+Cr/i.test(t)){ mode="credit"; return; }
+      if(/^Parcelamentos?\b/i.test(t) && !/\d/.test(t)){ mode="inst"; return; }
+      if(/^Despesas\s*$/i.test(t)){ mode="exp"; return; }
+      const vt = /VALOR\s+TOTAL\s+(-?[\d.]+,\d{2})/i.exec(t);
+      if(vt){ secTotal[card.last]=brNum(vt[1]); mode=null; return; }
+      if(!mode) return;
+      const m = SAN_TX.exec(t); if(!m) return;
+      const dd=+m[1], mm=+m[2]; if(mm<1||mm>12||dd<1||dd>31) return;
+      const amount = brNum(m[6]); if(isNaN(amount) || amount===0) return;
+      const parc = (m[4]&&+m[4]>0&&+m[5]>=+m[4]) ? {n:+m[4], m:+m[5]} : null;
+      let kind = "tx";
+      if(mode==="credit") kind = (/FATURA|PAGAMENTO|DEB\s*AUTOM/i.test(m[3])) ? "payment" : "credit";
+      else if(amount<0) kind="credit";
+      pending.push({dd,mm,desc:m[3],amount,parc,kind,card:card.last,first:card.first,section:mode,raw:t});
+    });
+    const fat = out.fatura;
+    pending.forEach(p=>{
+      const row = mkRow({date:inferDate(p.dd,p.mm,fat,p.parc?p.parc.n:1), desc:p.desc, amount:p.amount, kind:p.kind, card:p.card, parc:p.parc, section:p.section, raw:p.raw});
+      row.cardFirst = p.first;
+      out.rows.push(row);
+      if(p.kind==="tx") secSum[p.card]=r2((secSum[p.card]||0)+row.amount);
+    });
+    // marca bandeira pelo 1º dígito do cartão: 4 = Visa, 5 = Master
+    const firsts = out.cards.map(c=>c.first[0]);
+    out.brand = firsts.includes("4") ? "visa" : firsts.includes("5") ? "master" : null;
+    // conferências
+    Object.keys(secTotal).forEach(k=>{
+      const read=secSum[k]||0, printed=secTotal[k];
+      out.checks.push({label:"Cartão final "+k, read, printed, ok:Math.abs(read-printed)<0.005});
+    });
+    const sumAll = r2(out.rows.filter(r=>r.kind==="tx").reduce((s,r)=>s+r.amount,0));
+    if(out.expectedGross!=null) out.checks.push({label:"Total de despesas da fatura", read:sumAll, printed:r2(out.expectedGross+(out.exterior||0)), ok:Math.abs(sumAll-(out.expectedGross+(out.exterior||0)))<0.005});
+    return out;
+  }
+
+  // ------------------- BRADESCO (texto do PDF) -------------------
+  function parseBradesco(pages, meta){
+    const out = {issuer:"bradesco", rows:[], checks:[], fatura:null, notes:[], brand:"visa", cards:[], expectedGross:null, vencimento:null};
+    const p1 = pages[0]? buildLines(pages[0].words).map(l=>l.text).join(" ").replace(/\s+/g," ") : "";
+    const vm = /Vencimento[\s\S]{0,300}?(\d{2})\/(\d{2})\/(\d{4})/i.exec(p1);
+    if(vm){ out.fatura={year:+vm[3], month:+vm[2]-1, src:"vencimento"}; out.vencimento=vm[1]+"/"+vm[2]+"/"+vm[3]; }
+    const tt = /Total da fatura[^0-9]{0,60}R\$\s*([\d.]+,\d{2})/i.exec(p1); if(tt) out.totalPagar = brNum(tt[1]);
+    const cm = /\(\+\)\s*Compras\/D[eé]bitos[.\s]*R\$\s*([\d.]+,\d{2})/i.exec(p1); if(cm) out.expectedGross = brNum(cm[1]);
+    else if(out.totalPagar!=null) out.expectedGross = out.totalPagar;
+    let holder="", card=null; const pending=[]; const holderTotals={}, holderSum={};
+    pages.forEach((pg,pi)=>{
+      if(pi===0) return;
+      // só a tabela de lançamentos (esquerda); o painel de limites e taxas fica à direita
+      const ws = pg.words.filter(w=>w.x1 <= pg.w*0.60);
+      buildLines(ws).forEach(l=>{
+        const t=l.text;
+        const hc = /^(.*?)\s*Cart[aã]o\s+(\d{4})\s+\S{3,5}\s+\S{3,5}\s+(\d{4})/i.exec(t);
+        if(hc){ holder=hc[1].trim()||holder; card={first:hc[2],last:hc[3]}; if(!out.cards.find(c=>c.last===card.last)) out.cards.push({...card}); holderSum[card.last]=holderSum[card.last]||0; return; }
+        const tot = /^Total para\s+(.+?)\s+([\d.]+,\d{2})\s*$/i.exec(t);
+        if(tot){ if(card) holderTotals[card.last]=brNum(tot[2]); return; }
+        const items=l.items; if(!items.length || !/^\d{2}\/\d{2}$/.test(items[0].t)) return;
+        const last=items[items.length-1], prev=items[items.length-2];
+        let amtTxt, neg=false, endIdx=items.length;
+        if(last.t==="-" && prev && !isNaN(brNum(prev.t))){ amtTxt=prev.t; neg=true; endIdx=items.length-2; }
+        else if(!isNaN(brNum(last.t))){ amtTxt=last.t; endIdx=items.length-1; }
+        else return;
+        const amount = brNum(amtTxt)*(neg?-1:1);
+        if(amount===0) return;
+        const body = items.slice(1,endIdx);
+        const cityX = pg.w*0.343; // coluna "Cidade" começa em ~x=204 de 595
+        let descW=[], cityW=[];
+        body.forEach(w=>{ (w.x0 < cityX-2 ? descW : cityW).push(w.t); });
+        let desc = descW.join(" ");
+        let parc=null;
+        const pm = /(?:^|\s|\D)(\d{2})\/(\d{2})\s*$/.exec(desc);
+        if(pm && +pm[1]>0 && +pm[2]>=+pm[1]){ parc={n:+pm[1],m:+pm[2]}; desc=desc.slice(0,desc.length-pm[0].length+(/^\d/.test(pm[0])?0:pm[0].length-(pm[1].length+pm[2].length+1)));}
+        desc = desc.replace(/\s*\d{2}\/\d{2}\s*$/,"").trim();
+        const [dd,mm]=items[0].t.split("/").map(Number); if(mm<1||mm>12) return;
+        let kind="tx";
+        if(amount<0 || neg) kind = /PAGTO|PAGAMENTO/i.test(desc) ? "payment" : "credit";
+        pending.push({dd,mm,desc,amount,parc,kind,card:card?card.last:null,section:holder,raw:t});
+      });
+    });
+    pending.forEach(p=>{
+      const row = mkRow({date:inferDate(p.dd,p.mm,out.fatura,p.parc?p.parc.n:1), desc:p.desc, amount:p.amount, kind:p.kind, card:p.card, parc:p.parc, section:p.section, raw:p.raw});
+      out.rows.push(row);
+      if(p.kind==="tx" && p.card) holderSum[p.card]=r2((holderSum[p.card]||0)+row.amount);
+    });
+    Object.keys(holderTotals).forEach(k=>{ const read=holderSum[k]||0, printed=holderTotals[k]; out.checks.push({label:"Cartão final "+k, read, printed, ok:Math.abs(read-printed)<0.005}); });
+    const sumAll = r2(out.rows.filter(r=>r.kind==="tx").reduce((s,r)=>s+r.amount,0));
+    if(out.expectedGross!=null) out.checks.push({label:"Total da fatura", read:sumAll, printed:out.expectedGross, ok:Math.abs(sumAll-out.expectedGross)<0.005});
+    return out;
+  }
+
+  function detectIssuer(pages, meta){
+    const txt = pages.slice(0,2).map(p=>p.words.map(w=>w.t).join(" ")).join(" ").toLowerCase();
+    if(/santander/.test(txt) || /santander|fatura_\d{6}_/i.test((meta&&meta.title)||"")) return "santander";
+    if(/bradesco|visa infinite|cart[aã]o\s+\d{4}\s+xxxx/.test(txt)) return "bradesco";
+    return null;
+  }
+  function parsePdfPages(pages, meta){
+    const iss = detectIssuer(pages, meta);
+    if(iss==="santander") return parseSantander(pages, meta);
+    if(iss==="bradesco") return parseBradesco(pages, meta);
+    return {issuer:null, rows:[], checks:[], notes:["Não reconheci o emissor dessa fatura."]};
+  }
+  return {parsePdfPages, parseSantander, parseBradesco, detectIssuer, buildLines, brNum, cleanDesc, inferDate};
+})();
+
+
+// ===== Leitura do PDF no aparelho: texto direto ou OCR (bibliotecas carregadas só quando usadas) =====
+const PDFREAD = (function(){
+  const L = Object.assign({
+    pdfjs:"https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js",
+    pdfjsWorker:"https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js",
+    tesseract:"https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js",
+    tessOpts:{}
+  }, (typeof window!=="undefined" && window.PROSP_LIBS) || {});
+  const loaded = {};
+  const loadScript = url => loaded[url] || (loaded[url] = new Promise((res,rej)=>{
+    const s=document.createElement("script"); s.src=url; s.async=true;
+    s.onload=()=>res(); s.onerror=()=>{ delete loaded[url]; rej(new Error("Não consegui baixar um componente necessário ("+url.split("/")[2]+"). Verifique a internet.")); };
+    document.head.appendChild(s);
+  }));
+  async function ensurePdfjs(){
+    if(!window.pdfjsLib) await loadScript(L.pdfjs);
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = L.pdfjsWorker;
+    return window.pdfjsLib;
+  }
+  let tessWorker = null, tessLang = null;
+  async function getTess(lang, progress){
+    if(!window.Tesseract) await loadScript(L.tesseract);
+    if(tessWorker && tessLang===lang) return tessWorker;
+    if(tessWorker){ try{ await tessWorker.terminate(); }catch(e){} tessWorker=null; }
+    const mk = window.Tesseract.createWorker(lang, 1, Object.assign({
+      logger: m=>{ if(progress && m && m.status) progress(m); }
+    }, L.tessOpts));
+    const w = await Promise.race([mk, new Promise((_,rej)=>setTimeout(()=>rej(new Error("Tempo esgotado ao preparar o leitor de imagens. Verifique a internet.")),120000))]);
+    await w.setParameters({tessedit_pageseg_mode:"6", preserve_interword_spaces:"1"});
+    tessWorker=w; tessLang=lang; return w;
+  }
+  const tsvWords = tsv => {
+    const words=[]; let W=0,H=0;
+    String(tsv||"").split("\n").slice(1).forEach(l=>{
+      const r=l.split("\t"); if(r.length<12) return;
+      const lvl=+r[0];
+      if(lvl===1){ W=+r[8]; H=+r[9]; }
+      if(lvl===5 && r[11] && r[11].trim() && +r[10]>=0) words.push({t:r[11].trim(),x0:+r[6],y0:+r[7],x1:+r[6]+ +r[8],y1:+r[7]+ +r[9]});
+    });
+    return {words,W,H};
+  };
+
+  // Lê o PDF e devolve páginas {w,h,words} + metadados. onProgress(texto, 0..1). askPassword() -> Promise<string|null>
+  async function readPdf(file, opt){
+    opt = opt||{};
+    const prog = (t,p)=>{ if(opt.onProgress) opt.onProgress(t,p); };
+    prog("Abrindo o PDF…",0.02);
+    const pdfjs = await ensurePdfjs();
+    const data = new Uint8Array(await file.arrayBuffer());
+    const task = pdfjs.getDocument({data});
+    task.onPassword = (cb, reason)=>{
+      const again = reason===pdfjs.PasswordResponses.INCORRECT_PASSWORD;
+      Promise.resolve(opt.askPassword ? opt.askPassword(again) : null).then(pw=>{
+        if(pw==null || pw==="") task.destroy().catch(()=>{}); else cb(pw);
+      });
+    };
+    let doc;
+    try{ doc = await task.promise; }
+    catch(e){
+      if(e && (e.name==="PasswordException")) throw new Error("PDF protegido por senha — senha não informada ou incorreta.");
+      if(e && /destroy|Loading aborted/i.test(String(e.message||e))) throw new Error("PDF protegido por senha — senha não informada.");
+      throw new Error("Não consegui abrir esse PDF.");
+    }
+    let title = "";
+    try{ const m = await doc.getMetadata(); title = (m && m.info && m.info.Title) || ""; }catch(e){}
+    const n = doc.numPages;
+    const pages = []; let usedOcr = false;
+    for(let i=1;i<=n;i++){
+      const page = await doc.getPage(i);
+      const vp1 = page.getViewport({scale:1});
+      let words = [];
+      if(!opt.forceOcr && !opt.ocr){
+        const tc = await page.getTextContent();
+        words = tc.items.filter(it=>it.str && it.str.trim()).map(it=>({
+          t:it.str.trim(), x0:it.transform[4], x1:it.transform[4]+it.width,
+          y0:vp1.height-it.transform[5]-(it.height||8), y1:vp1.height-it.transform[5]
+        }));
+      }
+      if(words.length>=15){
+        pages.push({w:vp1.width,h:vp1.height,words});
+        prog("Lendo página "+i+" de "+n+"…", 0.05+0.9*i/n);
+        continue;
+      }
+      // página sem texto (imagem): OCR
+      usedOcr = true;
+      prog("Preparando a leitura da página "+i+" de "+n+" (a 1ª vez baixa o leitor de imagens)…", 0.05+0.9*(i-1)/n);
+      const oc = opt.ocr||{}; const dpi = oc.dpi||300; const lang = oc.lang||"eng";
+      let scale = dpi/72;
+      const maxPx = 12e6;
+      if(vp1.width*vp1.height*scale*scale > maxPx) scale = Math.sqrt(maxPx/(vp1.width*vp1.height));
+      const vp = page.getViewport({scale});
+      const cv = document.createElement("canvas"); cv.width=Math.floor(vp.width); cv.height=Math.floor(vp.height);
+      const ctx = cv.getContext("2d"); ctx.fillStyle="#fff"; ctx.fillRect(0,0,cv.width,cv.height);
+      await page.render({canvasContext:ctx, viewport:vp}).promise;
+      let worker;
+      try{ worker = await getTess(lang, m=>{}); }
+      catch(e){ if(lang==="eng") throw e; worker = await getTess("eng", m=>{}); }
+      prog("Lendo a imagem da página "+i+" de "+n+"… (pode levar alguns segundos)", 0.05+0.9*(i-0.5)/n);
+      const res = await worker.recognize(cv, {}, {tsv:true, text:false, blocks:false, hocr:false});
+      const tw = tsvWords(res.data.tsv);
+      pages.push({w:tw.W||cv.width, h:tw.H||cv.height, words:tw.words});
+      cv.width=cv.height=0;
+      prog("Página "+i+" de "+n+" lida.", 0.05+0.9*i/n);
+    }
+    try{ await doc.destroy(); }catch(e){}
+    return {pages, meta:{title, fileName:file.name}, usedOcr};
+  }
+
+  // Resultado do leitor -> linhas no mesmo formato do CSV (data, descricao, valor, tipo, origem, fatura, pessoa)
+  function toRaw(res, fileName){
+    const pad = n=>String(n).padStart(2,"0");
+    const fat = res.fatura ? res.fatura.year+"-"+pad(res.fatura.month+1) : "";
+    let brand = res.brand;
+    if(res.issuer==="santander" && !brand){ brand = /master/i.test(fileName||"") ? "master" : "visa"; }
+    const origem = res.issuer==="bradesco" ? "card3" : (brand==="master" ? "card2" : "card1");
+    const rows=[]; let payN=0, payTotal=0, credN=0, credTotal=0, txN=0, txTotal=0;
+    res.rows.forEach(r=>{
+      if(r.kind==="payment"){ payN++; payTotal+=r.amount; return; }
+      const credit = r.kind==="credit";
+      if(credit){ credN++; credTotal+=r.amount; } else { txN++; txTotal+=r.amount; }
+      rows.push({data:r.date, descricao:r.desc, valor:r.amount.toFixed(2), tipo:credit?"entrada":"gasto",
+        origem: credit?"corrente":origem, fatura: credit?"":fat, pessoa: res.issuer==="bradesco"?"p2":"",
+        _fromPdf:true, _credit:credit});
+    });
+    const rd = n=>Math.round(n*100)/100;
+    const totChk = res.checks.filter(c=>/^Total/i.test(c.label)).pop();
+    return {rows, origem, fat, payN, payTotal:rd(payTotal), credN, credTotal:rd(credTotal), txN, txTotal:rd(txTotal),
+            printedTotal: totChk ? totChk.printed : null};
+  }
+  async function dispose(){ if(tessWorker){ try{ await tessWorker.terminate(); }catch(e){} tessWorker=null; } }
+  return {readPdf, toRaw, dispose};
+})();
+
+
+window.PP=PP; window.PDFREAD=PDFREAD;
+</script>
 <script type="text/babel">
 
 const firebaseConfig = {
@@ -224,7 +575,7 @@ function ConfirmDialog({msg, onConfirm, onCancel}) {
         <div style={{display:"flex",justifyContent:"center",marginBottom:12,color:"#D92D6F"}}><Ico k="trash" size={36}/></div>
         <div style={{fontSize:15,fontWeight:700,color:"#17133A",textAlign:"center",marginBottom:6}}>Excluir lançamento?</div>
         <div style={{fontSize:13,color:"#5A5680",textAlign:"center",marginBottom:20,lineHeight:1.5}}>{msg}</div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10}}>
           <button onClick={onCancel} style={{background:"#F3F1FF",border:"none",borderRadius:12,padding:"13px",color:"#17133A",fontSize:14,fontWeight:700,cursor:"pointer"}}>Cancelar</button>
           <button onClick={onConfirm} style={{background:"#E8544A",border:"none",borderRadius:12,padding:"13px",color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer",boxShadow:"0 4px 12px rgba(232,84,74,0.3)"}}>Excluir</button>
         </div>
@@ -249,7 +600,7 @@ function EditExpModal({exp, onSave, onClose}) {
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
           <div style={{background:"#fff",borderRadius:22,padding:16,boxShadow:"0 1px 4px rgba(0,0,0,0.06)",border:"1px solid #ECE9FF",display:"flex",flexDirection:"column",gap:12}}>
             <input placeholder="Descrição" value={f.desc} onChange={e=>setF(v=>({...v,desc:e.target.value}))} style={{background:"#F9F9F9",border:"1.5px solid #E8E8E8",borderRadius:12,padding:"13px 14px",color:"#17133A",fontSize:15,outline:"none",width:"100%"}}/>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10}}>
               <div style={{position:"relative"}}>
                 <span style={{position:"absolute",left:13,top:"50%",transform:"translateY(-50%)",color:"#5A5680",fontSize:13,fontWeight:600}}>R$</span>
                 <input placeholder="0,00" type="number" min="0" value={f.amt} onChange={e=>setF(v=>({...v,amt:e.target.value}))} style={{background:"#F9F9F9",border:"1.5px solid #E8E8E8",borderRadius:12,padding:"13px 14px",paddingLeft:36,color:"#17133A",fontSize:15,outline:"none",width:"100%"}}/>
@@ -259,7 +610,7 @@ function EditExpModal({exp, onSave, onClose}) {
           </div>
           <div style={{background:"#fff",borderRadius:22,padding:16,boxShadow:"0 1px 4px rgba(0,0,0,0.06)",border:"1px solid #ECE9FF"}}>
             <div style={{fontSize:11,color:"#5A5680",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:10}}>Quem gastou</div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8}}>
               {PERSONS.map(p=>(
                 <button key={p.id} onClick={()=>setF(v=>({...v,person:p.id}))} style={{background:f.person===p.id?p.color:p.color+"10",border:"2px solid "+(f.person===p.id?p.color:p.color+"25"),borderRadius:12,padding:"12px 8px",color:f.person===p.id?"#fff":p.color,fontSize:14,fontWeight:700,cursor:"pointer"}}>{p.name}</button>
               ))}
@@ -278,14 +629,14 @@ function EditExpModal({exp, onSave, onClose}) {
           </div>
           <div style={{background:"#fff",borderRadius:22,padding:16,boxShadow:"0 1px 4px rgba(0,0,0,0.06)",border:"1px solid #ECE9FF"}}>
             <div style={{fontSize:11,color:"#5A5680",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:10}}>Pagamento</div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8}}>
               {PMS.map(p=>(
                 <button key={p.id} onClick={()=>setF(v=>({...v,pm:p.id}))} style={{background:f.pm===p.id?"#17133A":"#F9F9F9",border:"1.5px solid "+(f.pm===p.id?"#17133A":"#EBEBEB"),borderRadius:12,padding:"11px 10px",color:f.pm===p.id?"#fff":"#4a4a6a",fontSize:13,fontWeight:f.pm===p.id?700:500,cursor:"pointer",textAlign:"left"}}><IcoLabel k={p.e} size={18} gap={8}>{p.l}</IcoLabel></button>
               ))}
             </div>
             {bill&&<div style={{marginTop:12,background:"#EFEBFF",borderRadius:12,padding:"11px 14px",border:"1px solid #D9CFFF"}}><div style={{fontSize:12,color:"#5233E8",fontWeight:700}}><Ico k="card" size={13} mr={4}/>Débito em {MONTHS[bill.month]}</div></div>}
           </div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10}}>
             <button onClick={onClose} style={{background:"#F3F1FF",border:"none",borderRadius:18,padding:"15px",color:"#17133A",fontSize:15,fontWeight:700,cursor:"pointer"}}>Cancelar</button>
             <button onClick={()=>onSave(f)} style={{background:"#E8544A",border:"none",borderRadius:18,padding:"15px",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer",boxShadow:"0 4px 14px rgba(232,84,74,0.35)"}}>Salvar</button>
           </div>
@@ -307,7 +658,7 @@ function EditIncModal({inc, onSave, onClose}) {
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
           <div style={{background:"#fff",borderRadius:22,padding:16,boxShadow:"0 1px 4px rgba(0,0,0,0.06)",border:"1px solid #ECE9FF",display:"flex",flexDirection:"column",gap:12}}>
             <input placeholder="Descrição" value={f.desc} onChange={e=>setF(v=>({...v,desc:e.target.value}))} style={{background:"#F9F9F9",border:"1.5px solid #E8E8E8",borderRadius:12,padding:"13px 14px",color:"#17133A",fontSize:15,outline:"none",width:"100%"}}/>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10}}>
               <div style={{position:"relative"}}>
                 <span style={{position:"absolute",left:13,top:"50%",transform:"translateY(-50%)",color:"#5A5680",fontSize:13,fontWeight:600}}>R$</span>
                 <input placeholder="0,00" type="number" min="0" value={f.amt} onChange={e=>setF(v=>({...v,amt:e.target.value}))} style={{background:"#F9F9F9",border:"1.5px solid #E8E8E8",borderRadius:12,padding:"13px 14px",paddingLeft:36,color:"#17133A",fontSize:15,outline:"none",width:"100%"}}/>
@@ -317,7 +668,7 @@ function EditIncModal({inc, onSave, onClose}) {
           </div>
           <div style={{background:"#fff",borderRadius:22,padding:16,boxShadow:"0 1px 4px rgba(0,0,0,0.06)",border:"1px solid #ECE9FF"}}>
             <div style={{fontSize:11,color:"#5A5680",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:10}}>Quem recebeu</div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8}}>
               {PERSONS.map(p=>(
                 <button key={p.id} onClick={()=>setF(v=>({...v,person:p.id}))} style={{background:f.person===p.id?p.color:p.color+"10",border:"2px solid "+(f.person===p.id?p.color:p.color+"25"),borderRadius:12,padding:"12px 8px",color:f.person===p.id?"#fff":p.color,fontSize:14,fontWeight:700,cursor:"pointer"}}>{p.name}</button>
               ))}
@@ -334,7 +685,7 @@ function EditIncModal({inc, onSave, onClose}) {
               ))}
             </div>
           </div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10}}>
             <button onClick={onClose} style={{background:"#F3F1FF",border:"none",borderRadius:18,padding:"15px",color:"#17133A",fontSize:15,fontWeight:700,cursor:"pointer"}}>Cancelar</button>
             <button onClick={()=>onSave(f)} style={{background:"#00A86B",border:"none",borderRadius:18,padding:"15px",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer",boxShadow:"0 4px 14px rgba(0,168,107,0.35)"}}>Salvar</button>
           </div>
@@ -545,6 +896,8 @@ function MainApp({user, onLogout}) {
   const [confirmDel,setConfirmDel]= useState(null);
   const [reviewRows,setReviewRows]= useState([]);
   const [importErr, setImportErr] = useState("");
+  const [pdfBusy, setPdfBusy] = useState(null);
+  const [pdfInfo, setPdfInfo] = useState(null);
   const [bulkBill, setBulkBill] = useState({month:now.getMonth(), year:now.getFullYear()});
   const fileInputRef = useRef(null);
   const addLock = useRef(false);
@@ -1005,7 +1358,8 @@ function MainApp({user, onLogout}) {
           pm: pmObj.id,
           billMonth, billYear, billSource,
           cat: (rule && rule.kind==="gasto") ? rule.cat : "outros",
-          person: rule ? (rule.person||"p1") : "p1",
+          person: rule ? (rule.person||"p1") : (PERSONS.some(p=>p.id===String(get("pessoa","Pessoa")).trim()) ? String(get("pessoa","Pessoa")).trim() : "p1"),
+          fromPdf: !!r._fromPdf, credit: !!r._credit,
           incType: (rule && rule.kind==="entrada") ? (rule.incType||"salario") : "salario",
           matched: !!rule
         };
@@ -1020,6 +1374,52 @@ function MainApp({user, onLogout}) {
     rows.forEach(r=>{ if(r.billMonth!=null&&r.billYear!=null){ const k=r.billYear+"-"+r.billMonth; cnt[k]=(cnt[k]||0)+1; } });
     const top=Object.entries(cnt).sort((a,b)=>b[1]-a[1])[0];
     if(top){ const [y,m]=top[0].split("-").map(Number); setBulkBill({month:m,year:y}); }
+  };
+
+  const processPdf = async file => {
+    setImportErr(""); setPdfInfo(null);
+    setPdfBusy({msg:"Abrindo o PDF…",pct:0.02});
+    let pw = null;
+    const ask = again => { if(pw && !again) return Promise.resolve(pw); const p = window.prompt(again?"Senha incorreta. Digite novamente a senha do PDF:":"Este PDF tem senha. Digite a senha:"); pw = p; return Promise.resolve(p); };
+    const onProgress = (msg,pct)=>setPdfBusy({msg,pct});
+    try{
+      const score = r => (r.issuer?1:0)*1e6 + r.checks.filter(c=>c.ok).length*1e3 - r.checks.filter(c=>!c.ok).length*1e3/2 + r.rows.length;
+      const bad = r => !r.issuer || r.rows.length===0 || r.checks.some(c=>!c.ok);
+      let rd = await PDFREAD.readPdf(file,{onProgress,askPassword:ask});
+      let res = PP.parsePdfPages(rd.pages, rd.meta);
+      const plans = [{lang:"por",dpi:300},{lang:"eng",dpi:400},{lang:"por",dpi:400},{lang:"eng",dpi:250}];
+      window.__pdfLog = [{plan:rd.usedOcr?"ocr eng 300":"texto", ok:!bad(res), rows:res.rows.length}];
+      let tries = 0;
+      while(res.issuer && bad(res) && tries<plans.length && tries<3){
+        const pl = plans[tries++];
+        onProgress("A leitura não bateu com o total da fatura; tentando de novo ("+tries+")…",0.1);
+        try{
+          const rd2 = await PDFREAD.readPdf(file,{onProgress,askPassword:ask,ocr:pl});
+          const r2 = PP.parsePdfPages(rd2.pages, rd2.meta);
+          window.__pdfLog.push({plan:"ocr "+pl.lang+" "+pl.dpi, ok:!bad(r2), rows:r2.rows.length});
+          if(score(r2)>score(res)){ res=r2; rd=rd2; }
+        }catch(e2){ window.__pdfLog.push({plan:"erro", msg:String(e2&&e2.message)}); }
+      }
+      if(!res.issuer){ setImportErr("Não reconheci o banco dessa fatura. Por enquanto leio faturas do Santander (Visa e Master) e do Bradesco."); setPdfBusy(null); return; }
+      if(res.rows.length===0){ setImportErr("Não encontrei compras nesse PDF. Se for uma foto/print, tente exportar a fatura em PDF direto do app do banco."); setPdfBusy(null); return; }
+      const raw = PDFREAD.toRaw(res, file.name);
+      const rows = buildRows(raw.rows);
+      loadRows(rows);
+      if(raw.fat && raw.printedTotal!=null){
+        const [fy,fm] = raw.fat.split("-").map(Number);
+        setExpTotals({[raw.origem+"|"+fy+"|"+(fm-1)]: String(raw.printedTotal.toFixed(2)).replace(".",",")});
+      }
+      setPdfInfo({
+        issuer: res.issuer==="bradesco" ? "Bradesco" : "Santander "+(raw.origem==="card2"?"Master":"Visa"),
+        file: file.name, fat: raw.fat, pm: raw.origem, ocr: rd.usedOcr,
+        checks: res.checks, payN: raw.payN, payTotal: raw.payTotal, credN: raw.credN, credTotal: raw.credTotal,
+        txN: raw.txN, txTotal: raw.txTotal
+      });
+    }catch(err){
+      setImportErr(String((err && err.message) || "Não consegui ler esse PDF."));
+    }
+    setPdfBusy(null);
+    try{ PDFREAD.dispose(); }catch(e){}
   };
 
   const handleFile = e => {
@@ -1048,15 +1448,24 @@ function MainApp({user, onLogout}) {
         }catch(err){ setImportErr("Não consegui ler essa planilha. Confira o formato."); }
       };
       reader.readAsBinaryString(file);
+    } else if(ext==="pdf"){
+      processPdf(file);
     } else {
-      setImportErr("Formato não suportado. Envie um arquivo .csv ou .xlsx.");
+      setImportErr("Formato não suportado. Envie um arquivo .pdf, .csv ou .xlsx.");
     }
     e.target.value = "";
   };
 
   const updateRow = (idx, patch) => setReviewRows(rows => rows.map((r,i)=> i===idx ? {...r,...patch} : r));
   const removeRow = idx => setReviewRows(rows => rows.filter((_,i)=>i!==idx));
-  const clearImport = () => { setReviewRows([]); setImportErr(""); setExpTotals({}); };
+  const clearImport = () => { setReviewRows([]); setImportErr(""); setExpTotals({}); setPdfInfo(null); };
+  const editRow = (idx, patch) => setReviewRows(rows => rows.map((r,i)=>{
+    if(i!==idx) return r;
+    const n = {...r,...patch};
+    n.norm = normalizeDesc(n.desc||"");
+    n.invalid = !/^\d{4}-\d{2}-\d{2}$/.test(n.date) || isNaN(new Date(n.date+"T12:00:00").getTime()) || !(n.amount>0);
+    return n;
+  }));
 
   const confirmImport = async () => {
     const rows = [];
@@ -1127,6 +1536,7 @@ function MainApp({user, onLogout}) {
 
       setReviewRows([]);
       setExpTotals({});
+      setPdfInfo(null);
       setSyncing(false);
       flash(rows.length+" lançamentos importados"+(manualDel.length?", "+manualDel.length+" manuais substituídos":"")+(skipped?" ("+skipped+" ignorados)":"")+"! ✓");
     }catch(err){
@@ -1323,7 +1733,7 @@ function MainApp({user, onLogout}) {
         {tab==="add"&&(
           <div style={{animation:"fadeIn 0.2s ease"}}>
             {/* Mode toggle */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",background:"#fff",borderRadius:14,padding:4,marginBottom:18,boxShadow:shadow,border:"1px solid #ECE9FF"}}>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",background:"#fff",borderRadius:14,padding:4,marginBottom:18,boxShadow:shadow,border:"1px solid #ECE9FF"}}>
               {[["expense","↓  Gasto","#E8544A"],["income","↑  Entrada","#00A86B"]].map(([m,l,c])=>(
                 <button key={m} onClick={()=>setMode(m)} style={{background:mode===m?c:"transparent",border:"none",borderRadius:11,padding:"11px",color:mode===m?"#fff":"#5A5680",fontSize:15,fontWeight:700,cursor:"pointer",transition:"all 0.2s"}}>{l}</button>
               ))}
@@ -1333,7 +1743,7 @@ function MainApp({user, onLogout}) {
               <div style={{display:"flex",flexDirection:"column",gap:14}}>
                 <div style={{background:"#fff",borderRadius:22,padding:16,boxShadow:shadow,border:"1px solid #ECE9FF",display:"flex",flexDirection:"column",gap:12}}>
                   <input placeholder="Descrição  (ex: Supermercado Extra)" value={ef.desc} onChange={e=>setEf(f=>({...f,desc:e.target.value}))} style={IS}/>
-                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                  <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10}}>
                     <div style={{position:"relative"}}>
                       <span style={{position:"absolute",left:13,top:"50%",transform:"translateY(-50%)",color:"#5A5680",fontSize:13,fontWeight:600}}>R$</span>
                       <input placeholder="0,00" type="number" min="0" value={ef.amt} onChange={e=>setEf(f=>({...f,amt:e.target.value}))} style={{...IS,paddingLeft:36}}/>
@@ -1345,7 +1755,7 @@ function MainApp({user, onLogout}) {
                 {/* Quem gastou */}
                 <div style={{background:"#fff",borderRadius:22,padding:16,boxShadow:shadow,border:"1px solid #ECE9FF"}}>
                   <div style={{fontSize:11,color:"#5A5680",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:10}}>Quem gastou</div>
-                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                  <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8}}>
                     {PERSONS.map(p=>(
                       <button key={p.id} onClick={()=>setEf(f=>({...f,person:p.id}))} style={{background:ef.person===p.id?p.color:p.color+"10",border:"2px solid "+(ef.person===p.id?p.color:p.color+"25"),borderRadius:12,padding:"12px 8px",color:ef.person===p.id?"#fff":p.color,fontSize:14,fontWeight:700,cursor:"pointer",transition:"all 0.15s"}}>{p.name}</button>
                     ))}
@@ -1368,7 +1778,7 @@ function MainApp({user, onLogout}) {
                 {/* Pagamento */}
                 <div style={{background:"#fff",borderRadius:22,padding:16,boxShadow:shadow,border:"1px solid #ECE9FF"}}>
                   <div style={{fontSize:11,color:"#5A5680",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:10}}>Pagamento</div>
-                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                  <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8}}>
                     {PMS.map(p=>(
                       <button key={p.id} onClick={()=>setEf(f=>({...f,pm:p.id}))} style={{background:ef.pm===p.id?"#17133A":"#F9F9F9",border:"1.5px solid "+(ef.pm===p.id?"#17133A":"#EBEBEB"),borderRadius:12,padding:"11px 10px",color:ef.pm===p.id?"#fff":"#4a4a6a",fontSize:13,fontWeight:ef.pm===p.id?700:500,cursor:"pointer",textAlign:"left",transition:"all 0.15s"}}><IcoLabel k={p.e} size={18} gap={8}>{p.l}</IcoLabel></button>
                     ))}
@@ -1407,7 +1817,7 @@ function MainApp({user, onLogout}) {
               <div style={{display:"flex",flexDirection:"column",gap:14}}>
                 <div style={{background:"#fff",borderRadius:22,padding:16,boxShadow:shadow,border:"1px solid #ECE9FF",display:"flex",flexDirection:"column",gap:12}}>
                   <input placeholder="Descrição (ex: Salário Maio)" value={inf.desc} onChange={e=>setInf(f=>({...f,desc:e.target.value}))} style={IS}/>
-                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                  <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10}}>
                     <div style={{position:"relative"}}>
                       <span style={{position:"absolute",left:13,top:"50%",transform:"translateY(-50%)",color:"#5A5680",fontSize:13,fontWeight:600}}>R$</span>
                       <input placeholder="0,00" type="number" min="0" value={inf.amt} onChange={e=>setInf(f=>({...f,amt:e.target.value}))} style={{...IS,paddingLeft:36}}/>
@@ -1418,7 +1828,7 @@ function MainApp({user, onLogout}) {
 
                 <div style={{background:"#fff",borderRadius:22,padding:16,boxShadow:shadow,border:"1px solid #ECE9FF"}}>
                   <div style={{fontSize:11,color:"#5A5680",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:10}}>Quem recebeu</div>
-                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                  <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8}}>
                     {PERSONS.map(p=>(
                       <button key={p.id} onClick={()=>setInf(f=>({...f,person:p.id}))} style={{background:inf.person===p.id?p.color:p.color+"10",border:"2px solid "+(inf.person===p.id?p.color:p.color+"25"),borderRadius:12,padding:"12px 8px",color:inf.person===p.id?"#fff":p.color,fontSize:14,fontWeight:700,cursor:"pointer",transition:"all 0.15s"}}>{p.name}</button>
                     ))}
@@ -1449,15 +1859,37 @@ function MainApp({user, onLogout}) {
             <div style={{background:"#fff",borderRadius:22,padding:16,marginBottom:14,boxShadow:shadow,border:"1px solid #ECE9FF"}}>
               <div style={{fontSize:11,color:"#5A5680",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:8}}>Importar lançamentos</div>
               <div style={{fontSize:12,color:"#5A5680",lineHeight:1.6,marginBottom:14}}>
-                Envie um arquivo <strong>.csv</strong> ou <strong>.xlsx</strong> com as colunas: <strong>data</strong> (AAAA-MM-DD), <strong>descricao</strong>, <strong>valor</strong>, <strong>tipo</strong> (gasto/entrada) e <strong>origem</strong> (corrente, card1, card2 ou card3). Para gastos de cartão, você pode incluir também a coluna opcional <strong>fatura</strong> (AAAA-MM) informando o mês exato da fatura — evita erro de arredondamento quando a compra é no fim do mês. Se não vier preenchida, o app estima pelo dia de fechamento do cartão e avisa na revisão.
+                Envie o <strong>PDF da fatura</strong> (Santander Visa/Master ou Bradesco) — o app lê as compras, confere com o total impresso e mostra tudo para você revisar; o PDF não sai do seu aparelho. Ou envie um arquivo <strong>.csv</strong> ou <strong>.xlsx</strong> com as colunas: <strong>data</strong> (AAAA-MM-DD), <strong>descricao</strong>, <strong>valor</strong>, <strong>tipo</strong> (gasto/entrada) e <strong>origem</strong> (corrente, card1, card2 ou card3). Para gastos de cartão, você pode incluir também a coluna opcional <strong>fatura</strong> (AAAA-MM) informando o mês exato da fatura — evita erro de arredondamento quando a compra é no fim do mês. Se não vier preenchida, o app estima pelo dia de fechamento do cartão e avisa na revisão.
               </div>
-              <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls" onChange={handleFile} style={{display:"none"}}/>
+              <input ref={fileInputRef} type="file" accept=".pdf,.csv,.xlsx,.xls,application/pdf" onChange={handleFile} style={{display:"none"}}/>
               <button onClick={()=>fileInputRef.current&&fileInputRef.current.click()} style={{background:"#5233E8",border:"none",borderRadius:18,padding:"14px",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer",width:"100%",boxShadow:"0 4px 14px rgba(82,51,232,0.3)"}}><IcoLabel k="upload" size={18} gap={8}>Escolher arquivo</IcoLabel></button>
+              {pdfBusy&&(
+                <div style={{marginTop:10,background:"#EFEBFF",borderRadius:12,padding:"10px 12px"}}>
+                  <div style={{fontSize:12,fontWeight:700,color:"#5233E8",marginBottom:6}}>{pdfBusy.msg}</div>
+                  <div style={{height:6,background:"#D9CFFF",borderRadius:6,overflow:"hidden"}}><div style={{height:6,width:Math.round(Math.max(3,Math.min(100,(pdfBusy.pct||0)*100)))+"%",background:"#5233E8",transition:"width .3s"}}/></div>
+                </div>
+              )}
               {importErr&&<div style={{marginTop:10,background:"#FFF0EF",color:"#E8544A",borderRadius:10,padding:"9px 12px",fontSize:12,fontWeight:600}}>{importErr}</div>}
             </div>
 
             {reviewRows.length>0&&(
               <>
+                {pdfInfo&&(
+                  <div style={{background:"#fff",borderRadius:18,padding:"12px 14px",marginBottom:10,boxShadow:shadow,border:"1px solid #ECE9FF"}}>
+                    <div style={{fontSize:10,color:"#5A5680",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:6}}>Fatura lida do PDF</div>
+                    <div style={{fontSize:13,fontWeight:700,color:"#17133A"}}>{pdfInfo.issuer}{pdfInfo.fat?" · fatura "+MONTHS[parseInt(pdfInfo.fat.split("-")[1],10)-1]+"/"+pdfInfo.fat.split("-")[0]:" · mês da fatura não identificado"}</div>
+                    <div style={{fontSize:11,color:"#5A5680",marginTop:2,marginBottom:6}}>{pdfInfo.txN} compras · {fmt(pdfInfo.txTotal)} · lançadas em {PMS.find(p=>p.id===pdfInfo.pm)?.l}{pdfInfo.ocr?" · lido por imagem":""}</div>
+                    {pdfInfo.checks.map((c,i)=>(
+                      <div key={i} style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"4px 0",borderTop:"1px solid #F3F3F3",color:c.ok?"#00A86B":"#E8544A",fontWeight:600}}>
+                        <span>{c.ok?"✓":"⚠"} {c.label}</span>
+                        <span>{c.ok?fmt(c.read):"lido "+fmt(c.read)+" · fatura "+fmt(c.printed)}</span>
+                      </div>
+                    ))}
+                    {pdfInfo.checks.some(c=>!c.ok)&&<div style={{fontSize:11,color:"#E8544A",marginTop:6,lineHeight:1.5}}>Alguma linha pode ter sido lida errada ou ficou de fora. Confira os valores abaixo (dá para tocar em Editar) antes de confirmar.</div>}
+                    {pdfInfo.payN>0&&<div style={{fontSize:11,color:"#5A5680",marginTop:6}}>Pagamento da fatura anterior ({fmt(pdfInfo.payTotal)}) ignorado, para não contar em dobro.</div>}
+                    {pdfInfo.credN>0&&<div style={{fontSize:11,color:"#B7791F",marginTop:4}}>{pdfInfo.credN} crédito(s)/estorno(s) ({fmt(pdfInfo.credTotal)}) entram como Entrada · Reembolso — remova se preferir.</div>}
+                  </div>
+                )}
                 <div style={{background:"#EFEBFF",borderRadius:18,padding:"12px 16px",marginBottom:12,border:"1px solid #D9CFFF",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <div>
                     <div style={{fontSize:13,fontWeight:700,color:"#5233E8"}}>{effRows.length} a importar · {reviewRows.length} no arquivo</div>
@@ -1517,6 +1949,13 @@ function MainApp({user, onLogout}) {
                       </div>
                       <div style={{fontSize:14,fontWeight:800,color:row.kind==="gasto"?"#E8544A":"#00A86B",flexShrink:0}}>{row.kind==="gasto"?"-":"+"}{fmt(row.amount)}</div>
                     </div>
+                    {row.credit&&<div style={{fontSize:10,color:"#B7791F",background:"#FFF8E6",display:"inline-block",padding:"2px 8px",borderRadius:20,marginBottom:8,marginRight:6,fontWeight:700}}>crédito/estorno na fatura</div>}
+                    {row._edit&&(
+                      <div style={{display:"flex",gap:6,marginBottom:8}}>
+                        <input value={row.desc} onChange={e=>editRow(idx,{desc:e.target.value})} style={{...SS,flex:1,minWidth:0,cursor:"text"}} aria-label="Descrição"/>
+                        <input inputMode="decimal" defaultValue={String(row.amount).replace(".",",")} onBlur={e=>editRow(idx,{amount:parseAmount(e.target.value)})} style={{...SS,width:96,cursor:"text"}} aria-label="Valor"/>
+                      </div>
+                    )}
                     {row.matched&&<div style={{fontSize:10,color:"#5233E8",background:"#EFEBFF",display:"inline-block",padding:"2px 8px",borderRadius:20,marginBottom:8,marginRight:6,fontWeight:600}}>✓ categoria aprendida</div>}
                     {rowStatus[idx]&&rowStatus[idx].invalid&&<div style={{fontSize:10,color:"#E8544A",background:"#FFF0EF",display:"inline-block",padding:"2px 8px",borderRadius:20,marginBottom:8,marginRight:6,fontWeight:700}}>✕ data ou valor inválido — será ignorada</div>}
                     {rowStatus[idx]&&rowStatus[idx].dup&&!rowStatus[idx].invalid&&(
@@ -1578,12 +2017,13 @@ function MainApp({user, onLogout}) {
                           <input type="number" value={row.billYear ?? ""} onChange={e=>updateRow(idx,{billYear:parseInt(e.target.value,10),billSource:"manual"})} style={{...SS,width:72}} title="Ano da fatura"/>
                         </>
                       )}
-                      <button onClick={()=>removeRow(idx)} style={{background:"transparent",border:"none",color:"#D92D6F",fontSize:16,cursor:"pointer",marginLeft:"auto"}}><Ico k="trash" size={18}/></button>
+                      {row.fromPdf&&<button onClick={()=>updateRow(idx,{_edit:!row._edit})} style={{fontSize:11,background:"transparent",border:"1px solid #E8E8E8",borderRadius:20,padding:"4px 10px",color:"#5A5680",cursor:"pointer",fontWeight:600,marginLeft:"auto"}}>{row._edit?"Pronto":"Editar"}</button>}
+                      <button onClick={()=>removeRow(idx)} style={{background:"transparent",border:"none",color:"#D92D6F",fontSize:16,cursor:"pointer",marginLeft:row.fromPdf?0:"auto"}}><Ico k="trash" size={18}/></button>
                     </div>
                   </div>
                 ))}
 
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginTop:14}}>
+                <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10,marginTop:14}}>
                   <button onClick={clearImport} style={{background:"#F3F1FF",border:"none",borderRadius:18,padding:"15px",color:"#17133A",fontSize:15,fontWeight:700,cursor:"pointer"}}>Cancelar</button>
                   <button onClick={confirmImport} disabled={syncing} style={{background:"#5233E8",border:"none",borderRadius:18,padding:"15px",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer",boxShadow:"0 4px 14px rgba(82,51,232,0.35)",opacity:syncing?0.6:1}}>{syncing?"Salvando...":"Confirmar Importação"}</button>
                 </div>
@@ -1637,7 +2077,7 @@ function MainApp({user, onLogout}) {
         {tab==="dash"&&dashView==="geral"&&(
           <div style={{animation:"fadeIn 0.2s ease",display:"flex",flexDirection:"column",gap:14}}>
 
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10}}>
               {PERSONS.map(p=>{
                 const inc=pInc(p.id), deb=pDebit(p.id), b=inc-deb;
                 return (
@@ -1689,7 +2129,7 @@ function MainApp({user, onLogout}) {
               </div>
             )}
 
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10}}>
               <div style={{background:"#fff",borderRadius:18,padding:"13px 14px",boxShadow:shadow}}>
                 <div style={{fontSize:12,color:"#12A06B",fontWeight:800,marginBottom:4}}>Corrente</div>
                 <div style={{fontSize:17,fontWeight:800}}>{fmt(debitExp.filter(e=>!e.isCard).reduce((s,e)=>s+e.amount,0))}</div>
@@ -1787,7 +2227,7 @@ function MainApp({user, onLogout}) {
         {/* ══ LISTA ══ */}
         {tab==="list"&&(
           <div style={{animation:"fadeIn 0.2s ease"}}>
-            <div style={{background:"#fff",borderRadius:14,padding:4,marginBottom:16,boxShadow:shadow,border:"1px solid #ECE9FF",display:"grid",gridTemplateColumns:"1fr 1fr"}}>
+            <div style={{background:"#fff",borderRadius:14,padding:4,marginBottom:16,boxShadow:shadow,border:"1px solid #ECE9FF",display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)"}}>
               {[["expense","↓ Gastos"],["income","↑ Entradas"]].map(([m,l])=>(
                 <button key={m} onClick={()=>setMode(m)} style={{background:mode===m?"#17133A":"transparent",border:"none",borderRadius:11,padding:"10px",color:mode===m?"#fff":"#5A5680",fontSize:14,fontWeight:700,cursor:"pointer",transition:"all 0.2s"}}>{l}</button>
               ))}
@@ -1969,7 +2409,7 @@ function MainApp({user, onLogout}) {
           <div style={{animation:"fadeIn 0.2s ease"}}>
 <div style={{fontSize:12,color:"#5A5680",fontWeight:600,marginBottom:14,letterSpacing:1,textTransform:"uppercase"}}>Comparativo Mensal</div>
 
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10,marginBottom:14}}>
               {[{lbl:MONTHS[prevM],inc:prevI,exp:prevT},{lbl:MONTHS[month],inc:totInc,exp:totDebit}].map((col,idx)=>{
                 const b=col.inc-col.exp;
                 return (
@@ -2067,7 +2507,7 @@ function MainApp({user, onLogout}) {
             )}
             {invView==="contas"&&(<>
 
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10,marginBottom:16}}>
               <div style={{background:"#17133A",borderRadius:22,padding:"15px",boxShadow:shadowMd}}>
                 <div style={{fontSize:10,color:"rgba(255,255,255,0.5)",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:6}}>Patrimônio</div>
                 <div style={{fontSize:20,fontWeight:800,color:"#F59E0B"}}>{fmt(totInv)}</div>
@@ -2147,12 +2587,12 @@ function MainApp({user, onLogout}) {
                   <option value="">Selecione a conta...</option>
                   {accounts.map(a=><option key={a.id} value={a.id}>{a.name} — {a.inst}</option>)}
                 </select>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(0,1fr))",gap:8}}>
                   {MOV_TYPES.map(t=>(
                     <button key={t.id} onClick={()=>setInvF(f=>({...f,type:t.id}))} style={{background:invF.type===t.id?t.c:t.c+"10",border:"2px solid "+(invF.type===t.id?t.c:t.c+"25"),borderRadius:12,padding:"11px 4px",color:invF.type===t.id?"#fff":t.c,fontSize:13,fontWeight:700,cursor:"pointer"}}>{t.l}</button>
                   ))}
                 </div>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10}}>
                   <input placeholder={invF.type==="rendimento"?"Valor (pode ser negativo)":"Valor"} type="number" step="0.01" value={invF.amt} onChange={e=>setInvF(f=>({...f,amt:e.target.value}))} style={IS}/>
                   <input type="date" value={invF.date} onChange={e=>setInvF(f=>({...f,date:e.target.value}))} style={IS}/>
                 </div>
@@ -2272,12 +2712,12 @@ function EditMoveModal({mov, accounts, onSave, onDelete, onClose}) {
           <select value={f.accId} onChange={e=>setF(v=>({...v,accId:e.target.value}))} style={{...IS,padding:"13px 14px"}}>
             {accounts.map(a=><option key={a.id} value={a.id}>{a.name} — {a.inst}</option>)}
           </select>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(0,1fr))",gap:8}}>
             {MOV_TYPES.map(t=>(
               <button key={t.id} onClick={()=>setF(v=>({...v,type:t.id}))} style={{background:f.type===t.id?t.c:t.c+"10",border:"2px solid "+(f.type===t.id?t.c:t.c+"25"),borderRadius:12,padding:"11px 4px",color:f.type===t.id?"#fff":t.c,fontSize:13,fontWeight:700,cursor:"pointer"}}>{t.l}</button>
             ))}
           </div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10}}>
             <input placeholder="Valor" type="number" step="0.01" value={f.amt} onChange={e=>setF(v=>({...v,amt:e.target.value}))} style={IS}/>
             <input type="date" value={f.date} onChange={e=>setF(v=>({...v,date:e.target.value}))} style={IS}/>
           </div>
